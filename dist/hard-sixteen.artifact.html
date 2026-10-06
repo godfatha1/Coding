@@ -1727,6 +1727,13 @@ function renderAnswered() {
         </div>
       </div>
 
+      <div class="btn-row">
+        ${justRetired
+          ? '<span class="note" style="flex:1 1 auto;align-self:center">Mastered. You will not see this hand again.</span>'
+          : `<button class="btn" id="retireBtn" type="button">Too easy — retire</button>`}
+        <button class="btn btn-primary" id="nextBtn" type="button">Next hand</button>
+      </div>
+
       <div class="odds-hero">
         <div class="section-head" style="margin:0">
           <h2 class="section-title">If you ${ACTION_NAME[book.action].toLowerCase()}</h2>
@@ -1742,12 +1749,6 @@ function renderAnswered() {
         ${dealerLine()}
       </details>
 
-      <div class="btn-row">
-        ${justRetired
-          ? '<span class="note" style="flex:1 1 auto;align-self:center">Mastered. You will not see this hand again.</span>'
-          : `<button class="btn" id="retireBtn" type="button">Too easy — retire</button>`}
-        <button class="btn btn-primary" id="nextBtn" type="button">Next hand</button>
-      </div>
       ${justRetired || answered.lowConfidence || !answered.correct ? '' : `<p class="note">${toGo} more confident ${toGo === 1 ? 'answer' : 'answers'} and this hand retires itself.</p>`}
       ${answered.lowConfidence ? '<p class="note">Marked shaky — this one comes back soon.</p>' : ''}
     </div>`;
