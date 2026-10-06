@@ -1,7 +1,7 @@
 import { normalizeRules, rulesSummary, RULE_PRESETS } from '../engine/rules.js';
 import { handTotal, isPair, rankLabel } from '../engine/cards.js';
 import { analyzeHand } from '../engine/odds.js';
-import { lookupStrategy, explainCode, chartFor, UPCARDS, codeToAction } from '../engine/strategy.js';
+import { lookupStrategy, chartFor, UPCARDS, codeToAction, rowLabel, rowRule } from '../engine/strategy.js';
 import { dealScenario, parseScenario, scenarioLabel, HARD_TOTALS, SOFT_TOTALS, PAIR_RANKS } from '../engine/scenarios.js';
 import { gradeCard, pickNext, retireCard, reviveCard, cardCounts, dueCount, isShaky } from '../engine/srs.js';
 import { loadState, saveState, deckFor, ensureCard, clearProgress, exportJSON, importJSON } from './store.js';
@@ -35,6 +35,8 @@ function applyTheme() {
   if (t === 'system') delete document.documentElement.dataset.theme;
   else document.documentElement.dataset.theme = t;
 }
+
+const upcardArticle = (up) => (up === 1 ? 'an ace' : `a ${up}`);
 
 function buzz(ms) {
   if (!state.settings.haptics) return;
@@ -221,10 +223,8 @@ function renderAnswered() {
       <div class="verdict ${answered.correct ? 'good' : 'bad'}">
         <span class="mark" aria-hidden="true">${answered.correct ? '✓' : '✕'}</span>
         <div class="verdict-text">
-          <div class="verdict-head">${answered.correct
-            ? `${ACTION_IMPERATIVE[book.action]} — that's the book`
-            : `The book says ${ACTION_NAME[book.action].toLowerCase()}, not ${ACTION_NAME[answered.action].toLowerCase()}`}</div>
-          <div class="verdict-sub">${scenarioLabel(hand.scenario.id)} · ${explainCode(book.code, state.settings.rules)}</div>
+          <div class="verdict-head"><b>${rowLabel(book.section, book.key)}</b><span class="pipe">|</span>${rowRule(book.section, book.key, state.settings.rules)}</div>
+          ${answered.correct ? '' : `<div class="verdict-sub">You said ${ACTION_NAME[answered.action].toLowerCase()}. Against ${upcardArticle(hand.upcard)} it is ${ACTION_NAME[book.action].toLowerCase()}.</div>`}
         </div>
       </div>
 
@@ -335,7 +335,7 @@ function openCellSheet(id) {
       <span class="mark" aria-hidden="true" style="background:var(--accent);color:var(--accent-ink)">${ACTION_KEY[s.action]}</span>
       <div class="verdict-text">
         <div class="verdict-head">${ACTION_IMPERATIVE[s.action]}</div>
-        <div class="verdict-sub">${explainCode(s.code, state.settings.rules)}</div>
+        <div class="verdict-sub"><b>${rowLabel(s.section, s.key)}</b><span class="pipe">|</span>${rowRule(s.section, s.key, state.settings.rules)}</div>
       </div>
     </div>
     ${outcomeBlock(bookEntry)}

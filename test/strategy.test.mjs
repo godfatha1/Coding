@@ -102,5 +102,76 @@ for (const variant of ['s17', 'h17']) {
   say(material.length === 0, `${variant.toUpperCase()}: no cell where the engine beats the book by more than 0.004 EV`);
 }
 
+// 4. The plain-English rule for each row must describe that row exactly.
+// It is parsed back into an action per upcard and compared with the chart.
+import { rowRule, rowLabel } from '../src/engine/strategy.js';
+
+const VERB_TO_ACTION = { hit: 'hit', stand: 'stand', double: 'double', split: 'split', surrender: 'surrender' };
+const UP_TEXT = { A: 1, 10: 10, 9: 9, 8: 8, 7: 7, 6: 6, 5: 5, 4: 4, 3: 3, 2: 2 };
+
+// Turn "Stand 6 or less. Surrender against a 10. Otherwise hit." back into the
+// ten actions it claims, so a rule that drifts from its row fails here.
+function parseRule(text) {
+  const out = new Array(10).fill(null);
+  const at = (up) => UPCARDS.indexOf(up);
+  const always = /^Always (\w+)(?:, except (\w+) (?:against )?(an ace|a (\d+)))?\.$/.exec(text);
+  if (always) {
+    out.fill(VERB_TO_ACTION[always[1]]);
+    if (always[2]) out[at(always[3] === "an ace" ? 1 : Number(always[4]))] = VERB_TO_ACTION[always[2]];
+    return out;
+  }
+  const sentences = text.split('. ').map((t) => t.replace(/\.$/, ''));
+  const last = sentences.pop();
+  const otherwise = /^Otherwise (\w+)$/.exec(last);
+  if (!otherwise) throw new Error(`rule does not end with an otherwise clause: ${text}`);
+  for (const sentence of sentences) {
+    const m = /^(Hit|Stand|Double|Split|Surrender) (.+)$/.exec(sentence);
+    if (!m) throw new Error(`cannot read clause: ${sentence}`);
+    const action = VERB_TO_ACTION[m[1].toLowerCase()];
+    const spec = m[2];
+    let targets = [];
+    let r;
+    if ((r = /^against (an ace|a (\d+))$/.exec(spec))) targets = [r[1] === 'an ace' ? 1 : Number(r[2])];
+    else if ((r = /^(\w+) or less$/.exec(spec))) targets = UPCARDS.filter((u) => u !== 1 && u <= UP_TEXT[r[1]]);
+    else if ((r = /^(\w+) or higher$/.exec(spec))) targets = UPCARDS.filter((u) => u === 1 || u >= UP_TEXT[r[1]]);
+    else if ((r = /^(\w+) through (\w+)$/.exec(spec))) {
+      const [a, b] = [UPCARDS.indexOf(UP_TEXT[r[1]]), UPCARDS.indexOf(UP_TEXT[r[2]])];
+      targets = UPCARDS.slice(a, b + 1);
+    } else targets = spec.split(', ').map((t) => UP_TEXT[t]);
+    for (const up of targets) out[at(up)] = action;
+  }
+  return out.map((a) => a || VERB_TO_ACTION[otherwise[1]]);
+}
+
+for (const variant of ['s17', 'h17']) {
+  const rules = normalizeRules({ decks: 6, hitSoft17: variant === 'h17', das: true, surrender: true });
+  const chart = chartFor(rules);
+  let bad = 0;
+  for (const section of ['hard', 'soft', 'pairs']) {
+    for (const key of Object.keys(chart[section]).map(Number)) {
+      const text = rowRule(section, key, rules);
+      const claimed = parseRule(text);
+      const actual = chart[section][key].map((code) => codeToAction(code, rules));
+      for (let i = 0; i < 10; i += 1) {
+        if (claimed[i] !== actual[i]) {
+          bad += 1;
+          console.log(`FAIL  ${variant} ${rowLabel(section, key)} vs ${upLabel(UPCARDS[i])}: rule says ${claimed[i]}, chart says ${actual[i]} — "${text}"`);
+        }
+      }
+    }
+  }
+  say(bad === 0, `${variant.toUpperCase()}: every row rule reads back to its own chart row`);
+}
+
+// The toggles must move the wording, not just the cells.
+{
+  const noSurrender = normalizeRules({ surrender: false });
+  say(!/surrender/i.test(rowRule('hard', 16, noSurrender)), `without surrender, hard 16 drops it: "${rowRule('hard', 16, noSurrender)}"`);
+  const noDas = normalizeRules({ das: false });
+  say(!/split/i.test(rowRule('pairs', 4, noDas)), `without DAS, 4,4 is never a split: "${rowRule('pairs', 4, noDas)}"`);
+  say(rowRule('pairs', 1, normalizeRules({})) === 'Always split.', 'aces are always split');
+  say(rowRule('hard', 19, normalizeRules({})) === 'Always stand.', 'hard 19 always stands');
+}
+
 console.log(failures === 0 ? '\nAll strategy checks passed.' : `\n${failures} check(s) failed.`);
 process.exit(failures === 0 ? 0 : 1);

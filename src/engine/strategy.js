@@ -144,18 +144,86 @@ export function lookupStrategy(cards, upcard, rules) {
   return { code, section, key, action: codeToAction(code, rules) };
 }
 
-// One line of plain English for a chart cell, e.g. "Double, or hit if you cannot".
-export function explainCode(code, rules) {
-  switch (code) {
-    case 'H': return 'Hit.';
-    case 'S': return 'Stand.';
-    case 'D': return 'Double. Hit if doubling is off the table.';
-    case 'Ds': return 'Double. Stand if doubling is off the table.';
-    case 'P': return 'Split.';
-    case 'Ph': return rules.das ? 'Split, because double after split is allowed here.' : 'Hit. This is only a split when double after split is allowed.';
-    case 'Rh': return rules.surrender ? 'Surrender. Hit if surrender is off the table.' : 'Hit. This would be a surrender if the table allowed it.';
-    case 'Rs': return rules.surrender ? 'Surrender. Stand if surrender is off the table.' : 'Stand. This would be a surrender if the table allowed it.';
-    case 'Rp': return rules.surrender ? 'Surrender. Split if surrender is off the table.' : 'Split. This would be a surrender if the table allowed it.';
-    default: return '';
+// --- row rules -------------------------------------------------------------
+// A chart cell on its own teaches you one hand. The rule for the whole row —
+// "Stand 6 or less. Otherwise hit." — is the thing worth carrying to the table,
+// so it is derived from the row rather than written out by hand, which keeps it
+// honest when the rule toggles move cells around.
+
+const VERB = { hit: 'hit', stand: 'stand', double: 'double', split: 'split', surrender: 'surrender' };
+const VERB_CAP = { hit: 'Hit', stand: 'Stand', double: 'Double', split: 'Split', surrender: 'Surrender' };
+const UP_LABEL = (u) => (u === 1 ? 'A' : String(u));
+
+export function rowLabel(section, key) {
+  if (section === 'pairs') return `${UP_LABEL(key)},${UP_LABEL(key)}`;
+  if (section === 'soft') return `Soft ${key}`;
+  return `Hard ${key}`;
+}
+
+function runsOf(indices) {
+  const runs = [];
+  for (const i of indices) {
+    const last = runs[runs.length - 1];
+    if (last && i === last[last.length - 1] + 1) last.push(i);
+    else runs.push([i]);
   }
+  return runs;
+}
+
+function phraseRun(run) {
+  const labels = run.map((i) => UP_LABEL(UPCARDS[i]));
+  if (run[0] === 0 && run.length >= 2) return `${labels[labels.length - 1]} or less`;
+  if (run[run.length - 1] === UPCARDS.length - 1 && run.length >= 3) return `${labels[0]} or higher`;
+  if (run.length <= 3) return labels.join(', ');
+  return `${labels[0]} through ${labels[labels.length - 1]}`;
+}
+
+function describeSet(indices) {
+  if (indices.length === 1) return `against ${againstOne(indices[0])}`;
+  const runs = runsOf(indices);
+  // A scattered handful reads better as a flat list than as runs joined by "and".
+  if (runs.length > 1 && indices.length <= 4) return indices.map((i) => UP_LABEL(UPCARDS[i])).join(', ');
+  const phrases = runs.map(phraseRun);
+  if (phrases.length === 1) return phrases[0];
+  return `${phrases.slice(0, -1).join(', ')} and ${phrases[phrases.length - 1]}`;
+}
+
+function againstOne(index) {
+  const up = UPCARDS[index];
+  return up === 1 ? 'an ace' : `a ${up}`;
+}
+
+export function rowRule(section, key, rules) {
+  const row = chartFor(rules)[section][key];
+  const actions = row.map((code) => codeToAction(code, rules));
+
+  const groups = new Map();
+  actions.forEach((action, i) => {
+    if (!groups.has(action)) groups.set(action, []);
+    groups.get(action).push(i);
+  });
+  if (groups.size === 1) return `Always ${VERB[actions[0]]}.`;
+
+  // Whichever action is left unsaid decides how long the rule runs. Try each
+  // one as the "otherwise" and keep the shortest: fewest stretches of upcards
+  // to spell out, then fewest upcards, then hit as the natural default.
+  const preference = ['hit', 'stand', 'double', 'split', 'surrender'];
+  const cost = (action) => {
+    const rest = [...groups.entries()].filter(([a]) => a !== action);
+    return [
+      rest.reduce((n, [, idx]) => n + runsOf(idx).length, 0),
+      rest.reduce((n, [, idx]) => n + idx.length, 0),
+      preference.indexOf(action),
+    ];
+  };
+  const majority = [...groups.keys()].sort((a, b) => {
+    const [x, y] = [cost(a), cost(b)];
+    return x[0] - y[0] || x[1] - y[1] || x[2] - y[2];
+  })[0];
+
+  const rest = [...groups.entries()].filter(([a]) => a !== majority).sort((a, b) => a[1][0] - b[1][0]);
+  if (rest.length === 1 && rest[0][1].length === 1) {
+    return `Always ${VERB[majority]}, except ${VERB[rest[0][0]]} ${describeSet(rest[0][1])}.`;
+  }
+  return `${rest.map(([a, idx]) => `${VERB_CAP[a]} ${describeSet(idx)}.`).join(' ')} Otherwise ${VERB[majority]}.`;
 }
