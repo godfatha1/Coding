@@ -8,7 +8,9 @@ you own get retired and never shown again.
 No build step, no dependencies, no backend. It is a static page that works
 offline once loaded.
 
-![The drill, the chart and the progress view](dist/shots/dark-answered.png)
+| Drill | Chart | Progress |
+| --- | --- | --- |
+| ![A hand answered, with the odds behind the book play](docs/screenshots/drill.png) | ![The full basic strategy chart, filling in as cells are mastered](docs/screenshots/chart.png) | ![Mastery and accuracy by hand family](docs/screenshots/progress.png) |
 
 ## What it does
 
