@@ -12,7 +12,12 @@ const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const svg = readFileSync(join(root, 'icons/icon.svg'), 'utf8');
+// Only the root <svg> loses its intrinsic size; the shapes inside keep theirs
+// and scale with the viewBox.
+const svg = readFileSync(join(root, 'icons/icon.svg'), 'utf8').replace(
+  /<svg([^>]*)>/,
+  (_, attrs) => `<svg${attrs.replace(/\s(width|height)="[^"]*"/g, '')} style="display:block;width:100%;height:100%">`,
+);
 
 const TARGETS = [
   { file: 'icons/icon-192.png', size: 192, pad: 0 },
