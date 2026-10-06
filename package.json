@@ -1,0 +1,17 @@
+{
+  "name": "hard-sixteen",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Blackjack basic-strategy trainer with exact win/push/lose odds and spaced repetition.",
+  "type": "module",
+  "scripts": {
+    "build": "node tools/bundle.mjs",
+    "icons": "node tools/make-icons.mjs",
+    "serve": "node --run build >/dev/null && python3 -m http.server 8080",
+    "test:odds": "node test/odds.test.mjs",
+    "test:strategy": "node test/strategy.test.mjs",
+    "test:srs": "node test/srs.test.mjs",
+    "test:ui": "node tools/bundle.mjs >/dev/null && node test/ui.test.mjs",
+    "test": "node test/odds.test.mjs && node test/strategy.test.mjs && node test/srs.test.mjs && node tools/bundle.mjs >/dev/null && node test/ui.test.mjs"
+  }
+}
