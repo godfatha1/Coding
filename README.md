@@ -24,6 +24,14 @@ for the book play, then the same three figures plus expected value for every
 other action you could have taken, ranked. Tap any cell on the chart tab to see
 the same breakdown without playing a hand.
 
+**Tests it both ways.** The drill has two styles, picked from the segmented
+control at the top. *Name the play* deals a hand and asks for the action. *Name
+the hands* turns it around: it shows a rule and asks which hands it covers, as a
+four-way choice, so "Always hit" has to come back as hard 5 through 8. Rows that
+share a rule are one answer, which surfaces things the chart hides — hard 9 and
+soft 17 take the same rule, and so do 2,2, 3,3 and 7,7. *Mix* deals both. The
+two styles keep separate decks and separate mastery.
+
 **Remembers what you find hard.** Each cell is a spaced-repetition card:
 
 | What you did | What happens |
@@ -85,7 +93,7 @@ anywhere and open it; everything works except the service worker.
 npm test
 ```
 
-102 checks across four files:
+172 checks across five files:
 
 - **`test/odds.test.mjs`** — distributions sum to one; dealer bust rates match
   published tables for all ten upcards; the infinite-deck dealer tables for 6 and
@@ -95,14 +103,17 @@ npm test
 - **`test/strategy.test.mjs`** — every one of the 340 chart cells, in both S17 and
   H17, is compared against what the odds engine computes for the hands that row
   covers, weighted by how often the shoe deals them. **All 680 agree.**
+- **`test/rules-deck.test.mjs`** — across all eight rule combinations, every
+  chart row lands in exactly one rule group, no two groups share a rule, and
+  every row in a group really carries that group's rule.
 - **`test/srs.test.mjs`** — retirement, low-confidence rotation, miss handling,
   and a 4000-hand simulation of a learner who is shaky on hard 15 and 16: the
   shaky cells come back 50× more often than settled ones, none of them retires,
   and all 310 others do.
 - **`test/ui.test.mjs`** — drives the built page in Chromium: plays hands, checks
   the odds add to 100%, walks every tab, flips the rules and confirms the chart
-  moves, verifies progress survives a reload, and checks for horizontal overflow
-  at 360px and 900px.
+  moves, plays the reverse drill, verifies progress and drill style survive a
+  reload, and checks for horizontal overflow at 360px and 900px.
 
 ## Layout
 

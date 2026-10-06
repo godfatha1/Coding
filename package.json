@@ -11,7 +11,8 @@
     "test:odds": "node test/odds.test.mjs",
     "test:strategy": "node test/strategy.test.mjs",
     "test:srs": "node test/srs.test.mjs",
+    "test:rules": "node test/rules-deck.test.mjs",
     "test:ui": "node tools/bundle.mjs >/dev/null && node test/ui.test.mjs",
-    "test": "node test/odds.test.mjs && node test/strategy.test.mjs && node test/srs.test.mjs && node tools/bundle.mjs >/dev/null && node test/ui.test.mjs"
+    "test": "node test/odds.test.mjs && node test/strategy.test.mjs && node test/srs.test.mjs && node test/rules-deck.test.mjs && node tools/bundle.mjs >/dev/null && node test/ui.test.mjs"
   }
 }

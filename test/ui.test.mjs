@@ -138,6 +138,61 @@ say(/\/330/.test(stripAfter), 'the deck count is restored after a reload');
 const restored = Number(stripAfter.match(/(\d+)\/330/)[1]);
 say(restored === afterRetire, `mastered hands survive a reload (${restored})`);
 
+// --- name the hands ---
+await page.locator('.tab[data-view="drill"]').click();
+await page.waitForSelector('.action');
+await page.locator('.seg[data-mode="hands"]').click();
+await page.waitForSelector('.option');
+say(await page.locator('.option').count() === 4, 'the reverse drill offers four choices');
+const ruleText = await page.locator('.rule-text').innerText();
+say(/\.$/.test(ruleText), `a rule is posed as the question ("${ruleText}")`);
+const labels = await page.locator('.option').allInnerTexts();
+say(new Set(labels).size === 4, 'the four choices are all different');
+
+// Find and click the right one by matching the rule shown after answering.
+await page.locator('.option').first().click();
+await page.waitForSelector('#answer .verdict');
+say(await page.locator('#answer .grid .cell').count() >= 10, 'the answer shows the rows on the chart');
+say(await page.locator('#nextBtn').count() === 1 && await page.locator('#retireBtn').count() === 1,
+  'retire and next are offered on a rule question too');
+await page.waitForTimeout(350);
+await page.screenshot({ path: join(shots, 'reverse.png'), fullPage: true });
+
+// Scoring and the rule deck both move.
+const beforeRules = await page.locator('#strip').textContent();
+say(/\/\d+/.test(beforeRules), `the strip counts the rule deck (${beforeRules.trim().split('·').pop().trim()})`);
+
+const handsBefore = Number((await page.locator('#strip').textContent()).match(/(\d+) hands/)[1]);
+for (let i = 0; i < 8; i += 1) {
+  await page.locator('#nextBtn').click();
+  await page.waitForSelector('.option');
+  await page.locator('.option').nth(i % 4).click();
+  await page.waitForSelector('#nextBtn');
+}
+const handsAfter = Number((await page.locator('#strip').textContent()).match(/(\d+) hands/)[1]);
+say(handsAfter === handsBefore + 8, `rule answers count toward the session (${handsBefore} to ${handsAfter})`);
+
+// The mode sticks across a reload.
+await page.reload();
+await page.waitForSelector('.option, .action');
+say(await page.locator('.seg[data-mode="hands"]').getAttribute('aria-pressed') === 'true', 'the chosen drill style survives a reload');
+
+// Mix deals both kinds.
+await page.locator('.seg[data-mode="mix"]').click();
+let sawPlay = false;
+let sawRule = false;
+for (let i = 0; i < 40 && !(sawPlay && sawRule); i += 1) {
+  if (await page.locator('.option').count()) { sawRule = true; await page.locator('.option').first().click(); }
+  else { sawPlay = true; await page.locator('.action').first().click(); }
+  await page.waitForSelector('#nextBtn');
+  await page.locator('#nextBtn').click();
+  await page.waitForSelector('.option, .action');
+}
+say(sawPlay && sawRule, 'mix deals both kinds of question');
+
+await page.locator('.seg[data-mode="play"]').click();
+await page.waitForSelector('.action');
+
 // --- a wide screen still works ---
 await page.setViewportSize({ width: 900, height: 820 });
 await page.locator('.tab[data-view="drill"]').click();

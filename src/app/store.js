@@ -8,6 +8,7 @@ export const DEFAULT_SETTINGS = {
   rules: { ...DEFAULT_RULES },
   retireStreak: 3,
   filter: 'all',
+  mode: 'play',          // 'play' = name the action, 'hands' = name the hands, 'mix' = both
   theme: 'system',
   haptics: true,
   oddsUpFront: false,
@@ -21,6 +22,7 @@ function freshState() {
     step: 0,
     sinceNew: 0,
     cards: {},
+    ruleCards: {},
     lifetime: { answered: 0, correct: 0, shaky: 0, bestStreak: 0 },
     session: { answered: 0, correct: 0, streak: 0, recent: [] },
   };
@@ -41,10 +43,14 @@ export function loadState() {
     lifetime: { ...base.lifetime, ...(saved.lifetime || {}) },
     session: { ...base.session },
     cards: {},
+    ruleCards: {},
   };
   // Keep only cards that still name a real chart cell.
   for (const [id, card] of Object.entries(saved.cards || {})) {
     if (parseScenario(id) && card && typeof card === 'object') state.cards[id] = { ...newCard(id), ...card, id };
+  }
+  for (const [id, card] of Object.entries(saved.ruleCards || {})) {
+    if (/^R[hsp]\d+$/.test(id) && card && typeof card === 'object') state.ruleCards[id] = { ...newCard(id), ...card, id };
   }
   state.step = Number(saved.step) || 0;
   state.sinceNew = Number(saved.sinceNew) || 0;
@@ -60,7 +66,7 @@ export function saveState(state) {
     }
     localStorage.setItem(KEY, JSON.stringify({
       version: 1, settings: state.settings, step: state.step, sinceNew: state.sinceNew,
-      cards, lifetime: state.lifetime,
+      cards, ruleCards: state.ruleCards, lifetime: state.lifetime,
     }));
     return true;
   } catch { return false; }
@@ -71,6 +77,15 @@ export function deckFor(state) {
   return buildScenarioIds().map((id) => state.cards[id] || newCard(id));
 }
 
+export function ruleDeckFor(state, groups) {
+  return groups.map((g) => state.ruleCards[g.id] || newCard(g.id));
+}
+
+export function ensureRuleCard(state, id) {
+  if (!state.ruleCards[id]) state.ruleCards[id] = newCard(id);
+  return state.ruleCards[id];
+}
+
 export function ensureCard(state, id) {
   if (!state.cards[id]) state.cards[id] = newCard(id);
   return state.cards[id];
@@ -78,6 +93,7 @@ export function ensureCard(state, id) {
 
 export function clearProgress(state) {
   state.cards = {};
+  state.ruleCards = {};
   state.step = 0;
   state.sinceNew = 0;
   state.lifetime = { answered: 0, correct: 0, shaky: 0, bestStreak: 0 };
@@ -89,7 +105,7 @@ export function exportJSON(state) {
   return JSON.stringify({
     version: 1, exported: new Date().toISOString(),
     settings: state.settings, step: state.step, sinceNew: state.sinceNew,
-    cards: state.cards, lifetime: state.lifetime,
+    cards: state.cards, ruleCards: state.ruleCards, lifetime: state.lifetime,
   }, null, 1);
 }
 
@@ -104,9 +120,13 @@ export function importJSON(text) {
     sinceNew: Number(parsed.sinceNew) || 0,
     lifetime: { ...base.lifetime, ...(parsed.lifetime || {}) },
     cards: {},
+    ruleCards: {},
   };
   for (const [id, card] of Object.entries(parsed.cards)) {
     if (parseScenario(id) && card && typeof card === 'object') state.cards[id] = { ...newCard(id), ...card, id };
+  }
+  for (const [id, card] of Object.entries(parsed.ruleCards || {})) {
+    if (/^R[hsp]\d+$/.test(id) && card && typeof card === 'object') state.ruleCards[id] = { ...newCard(id), ...card, id };
   }
   return state;
 }

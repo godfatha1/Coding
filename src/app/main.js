@@ -2,9 +2,9 @@ import { normalizeRules, rulesSummary, RULE_PRESETS } from '../engine/rules.js';
 import { handTotal, isPair, rankLabel } from '../engine/cards.js';
 import { analyzeHand } from '../engine/odds.js';
 import { lookupStrategy, chartFor, UPCARDS, codeToAction, rowLabel, rowRule } from '../engine/strategy.js';
-import { dealScenario, parseScenario, scenarioLabel, HARD_TOTALS, SOFT_TOTALS, PAIR_RANKS } from '../engine/scenarios.js';
+import { dealScenario, parseScenario, scenarioLabel, ruleGroups, HARD_TOTALS, SOFT_TOTALS, PAIR_RANKS } from '../engine/scenarios.js';
 import { gradeCard, pickNext, retireCard, reviveCard, cardCounts, dueCount, isShaky } from '../engine/srs.js';
-import { loadState, saveState, deckFor, ensureCard, clearProgress, exportJSON, importJSON } from './store.js';
+import { loadState, saveState, deckFor, ruleDeckFor, ensureCard, ensureRuleCard, clearProgress, exportJSON, importJSON } from './store.js';
 import { pct1, pct0, signed, ACTION_KEY, ACTION_NAME, ACTION_IMPERATIVE, ACTION_GERUND, rowBar, rowNums, outcomeBlock, cardFace, cardBack } from './format.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -19,6 +19,13 @@ let lastId = null;
 let forcedId = null;
 let view = 'drill';
 let chartSelection = null;
+let quiz = null;          // the reverse question: a rule, four groups, one right
+
+const MODES = [
+  { id: 'play', label: 'Name the play' },
+  { id: 'hands', label: 'Name the hands' },
+  { id: 'mix', label: 'Mix' },
+];
 
 const FILTERS = [
   { id: 'all', label: 'Everything' },
@@ -56,7 +63,42 @@ function filteredDeck() {
   return deck.filter((c) => parseScenario(c.id).group === f);
 }
 
+const shuffled = (list) => list.map((v) => [Math.random(), v]).sort((a, b) => a[0] - b[0]).map(([, v]) => v);
+
+function wantsRuleQuestion() {
+  const mode = state.settings.mode;
+  if (mode === 'hands') return true;
+  if (mode === 'play') return false;
+  return Math.random() < 0.35;   // in Mix, roughly one hand in three
+}
+
+// Show a rule and ask which hands it covers. The three wrong choices are drawn
+// from the same family where possible, so the answer is not given away by shape.
+function dealRule() {
+  const groups = ruleGroups(state.settings.rules);
+  const deck = ruleDeckFor(state, groups);
+  const pick = pickNext(deck, { step: state.step, lastId, sinceNew: state.sinceNew, workingSet: 6, newEvery: 4 });
+  if (!pick) { quiz = null; hand = null; renderDrill(); return; }
+  const group = groups.find((g) => g.id === pick.id);
+  const others = groups.filter((g) => g.id !== group.id);
+  const family = group.rows[0].section;
+  const near = shuffled(others.filter((g) => g.rows[0].section === family));
+  const far = shuffled(others.filter((g) => g.rows[0].section !== family));
+  const options = shuffled([group, ...[...near, ...far].slice(0, 3)]);
+
+  quiz = { group, options, cardId: pick.id, chosen: null };
+  hand = null;
+  answered = null;
+  unsure = false;
+  peeked = false;
+  lastId = pick.id;
+  state.sinceNew = pick.stage === 'new' ? 0 : state.sinceNew + 1;
+  renderDrill();
+}
+
 function deal(id) {
+  if (!id && wantsRuleQuestion()) { dealRule(); return; }
+  quiz = null;
   const deck = filteredDeck();
   let pick = null;
   if (id) pick = ensureCard(state, id);
@@ -82,17 +124,7 @@ function legalActions() {
 
 /* ---------------- answering ---------------- */
 
-function answer(action, lowConfidence) {
-  if (!hand || answered) return;
-  const low = Boolean(lowConfidence || unsure || peeked);
-  const correct = action === book.action;
-  answered = { action, correct, lowConfidence: low };
-
-  const card = ensureCard(state, hand.scenario.id);
-  state.cards[card.id] = gradeCard(card, { correct, lowConfidence: low, step: state.step, settings: { retireStreak: state.settings.retireStreak } });
-  state.step += 1;
-  lastId = card.id;
-
+function tallyAnswer(correct, low) {
   state.lifetime.answered += 1;
   if (correct) state.lifetime.correct += 1;
   if (low) state.lifetime.shaky += 1;
@@ -105,16 +137,50 @@ function answer(action, lowConfidence) {
     state.session.streak = 0;
   }
   state.session.recent = [...state.session.recent, correct ? (low ? 'soft' : 'hit') : 'miss'].slice(-10);
+}
 
+function answer(action, lowConfidence) {
+  if (!hand || answered) return;
+  const low = Boolean(lowConfidence || unsure || peeked);
+  const correct = action === book.action;
+  answered = { action, correct, lowConfidence: low };
+
+  const card = ensureCard(state, hand.scenario.id);
+  state.cards[card.id] = gradeCard(card, { correct, lowConfidence: low, step: state.step, settings: { retireStreak: state.settings.retireStreak } });
+  state.step += 1;
+  lastId = card.id;
+
+  tallyAnswer(correct, low);
+  saveState(state);
+  buzz(correct ? 14 : [26, 50, 26]);
+  renderDrill({ felt: false });
+}
+
+function answerRule(index, lowConfidence) {
+  if (!quiz || quiz.chosen !== null) return;
+  const low = Boolean(lowConfidence || unsure);
+  const correct = quiz.options[index].id === quiz.group.id;
+  quiz.chosen = index;
+  quiz.correct = correct;
+  quiz.lowConfidence = low;
+
+  const card = ensureRuleCard(state, quiz.cardId);
+  state.ruleCards[card.id] = gradeCard(card, { correct, lowConfidence: low, step: state.step, settings: { retireStreak: state.settings.retireStreak } });
+  state.step += 1;
+  tallyAnswer(correct, low);
   saveState(state);
   buzz(correct ? 14 : [26, 50, 26]);
   renderDrill({ felt: false });
 }
 
 function retireCurrent() {
-  if (!hand) return;
-  const card = ensureCard(state, hand.scenario.id);
-  state.cards[card.id] = retireCard(card, state.step);
+  if (quiz) {
+    const card = ensureRuleCard(state, quiz.cardId);
+    state.ruleCards[card.id] = retireCard(card, state.step);
+  } else if (hand) {
+    const card = ensureCard(state, hand.scenario.id);
+    state.cards[card.id] = retireCard(card, state.step);
+  } else return;
   saveState(state);
   deal();
 }
@@ -122,14 +188,17 @@ function retireCurrent() {
 /* ---------------- drill view ---------------- */
 
 function renderStrip() {
-  const deck = deckFor(state);
+  const deck = quiz ? ruleDeckFor(state, ruleGroups(state.settings.rules)) : deckFor(state);
   const counts = cardCounts(deck);
   const due = dueCount(deck, state.step);
   const acc = state.session.answered ? pct0(state.session.correct / state.session.answered) : '--';
+  const noun = quiz ? 'rules' : 'chart cells';
   $('#strip').innerHTML = `
     <span><b class="num">${state.session.answered}</b> hands · <b class="num">${acc}</b> right</span>
     <span class="dots" aria-label="How the last ten answers went">${state.session.recent.slice(-10).map((r) => `<i class="${r}"></i>`).join('')}</span>
-    <span class="num" title="Chart cells mastered${due ? `, ${due} due for review` : ''}">${counts.retired}/${counts.total}${due ? ` \u00b7 ${due} due` : ''}</span>`;
+    <span class="num" title="${noun} mastered${due ? `, ${due} due for review` : ''}">${counts.retired}/${counts.total}${due ? ` \u00b7 ${due} due` : ''}</span>`;
+  $('#modes').innerHTML = MODES.map((m) =>
+    `<button class="seg" type="button" data-mode="${m.id}" aria-pressed="${state.settings.mode === m.id}">${m.label}</button>`).join('');
 }
 
 function renderFelt() {
@@ -147,6 +216,78 @@ function renderFelt() {
     <div class="hand-row">
       <div class="hand-label"><span class="eyebrow">Your hand</span><span class="hand-total">${handName}</span></div>
       <div class="cards">${hand.playerDisplay.map(cardFace).join('')}</div>
+    </div>`;
+}
+
+const shortRowLabel = (row) =>
+  (row.section === 'pairs' ? rowLabel('pairs', row.key) : `${row.section === 'hard' ? 'H' : 'S'}${row.key}`);
+
+// The rows a rule covers, drawn as the strip of chart they actually are.
+function miniGrid(rows) {
+  const rules = state.settings.rules;
+  const chart = chartFor(rules);
+  const header = '<div class="rh"></div>' + UPCARDS.map((u) => `<div class="hd">${rankLabel(u)}</div>`).join('');
+  const body = rows.map((row) => {
+    const cells = UPCARDS.map((up, col) => {
+      const code = chart[row.section][row.key][col];
+      return `<div class="cell a-${codeToAction(code, rules)}">${code}</div>`;
+    }).join('');
+    return `<div class="rh">${shortRowLabel(row)}</div>${cells}`;
+  }).join('');
+  return `<div class="chart-scroll"><div class="grid">${header}${body}</div></div>`;
+}
+
+function renderRuleFelt() {
+  $('#felt').innerHTML = `
+    <div class="rule-prompt">
+      <span class="eyebrow">The rule</span>
+      <p class="rule-text">${quiz.group.rule}</p>
+      ${quiz.chosen === null ? '<p class="rule-ask">Which hands does this cover?</p>' : ''}
+    </div>`;
+}
+
+function renderRulePending() {
+  $('#answer').innerHTML = `
+    <div class="panel" style="display:grid;gap:11px">
+      <button class="unsure" id="unsureBtn" type="button" aria-pressed="${unsure}">
+        <span class="box" aria-hidden="true">${unsure ? '\u2713' : ''}</span>
+        <span>Not sure about this one</span>
+        <span class="hint">or hold a button</span>
+      </button>
+      <div class="options">${quiz.options.map((g, i) =>
+        `<button class="option" type="button" data-opt="${i}"><span class="key">${i + 1}</span>${g.label}</button>`).join('')}</div>
+    </div>`;
+}
+
+function renderRuleAnswered() {
+  const card = state.ruleCards[quiz.cardId];
+  const justRetired = card && card.stage === 'retired';
+  const toGo = Math.max(0, state.settings.retireStreak - (card?.hcStreak || 0));
+  const chosen = quiz.options[quiz.chosen];
+  $('#answer').innerHTML = `
+    <div class="panel" style="display:grid;gap:12px">
+      <div class="verdict ${quiz.correct ? 'good' : 'bad'}">
+        <span class="mark" aria-hidden="true">${quiz.correct ? '\u2713' : '\u2715'}</span>
+        <div class="verdict-text">
+          <div class="verdict-head"><b>${quiz.group.label}</b></div>
+          ${quiz.correct ? '' : `<div class="verdict-sub">You picked ${chosen.label} \u2014 that one is \u201c${chosen.rule.replace(/\.$/, '')}\u201d.</div>`}
+        </div>
+      </div>
+
+      <div class="btn-row">
+        ${justRetired
+          ? '<span class="note" style="flex:1 1 auto;align-self:center">Mastered. You will not see this rule again.</span>'
+          : '<button class="btn" id="retireBtn" type="button">Too easy \u2014 retire</button>'}
+        <button class="btn btn-primary" id="nextBtn" type="button">Next</button>
+      </div>
+
+      <div>
+        <div class="section-head" style="margin:0 0 8px"><h2 class="section-title">On the chart</h2></div>
+        ${miniGrid(quiz.group.rows)}
+      </div>
+
+      ${justRetired || quiz.lowConfidence || !quiz.correct ? '' : `<p class="note">${toGo} more confident ${toGo === 1 ? 'answer' : 'answers'} and this rule retires itself.</p>`}
+      ${quiz.lowConfidence ? '<p class="note">Marked shaky \u2014 this one comes back soon.</p>' : ''}
     </div>`;
 }
 
@@ -257,6 +398,11 @@ function renderAnswered() {
 
 function renderDrill({ felt = true } = {}) {
   renderStrip();
+  if (quiz) {
+    renderRuleFelt();
+    if (quiz.chosen === null) renderRulePending(); else renderRuleAnswered();
+    return;
+  }
   if (felt) renderFelt();
   if (!hand) { $('#answer').innerHTML = ''; return; }
   if (answered) renderAnswered(); else renderPending();
@@ -355,6 +501,7 @@ function openCellSheet(id) {
 function renderStats() {
   const deck = deckFor(state);
   const counts = cardCounts(deck);
+  const ruleCounts = cardCounts(ruleDeckFor(state, ruleGroups(state.settings.rules)));
   const lifeAcc = state.lifetime.answered ? state.lifetime.correct / state.lifetime.answered : null;
 
   const groups = [
@@ -395,6 +542,7 @@ function renderStats() {
         <span class="lbl">${b.label}</span>
         <span class="bar-track"><span class="bar-fill" style="width:${(b.n / counts.total * 100).toFixed(1)}%"></span></span>
         <span class="amt">${b.n}</span></div>`).join('')}</div>
+      <p class="note" style="margin-top:10px">Name the hands runs its own deck: ${ruleCounts.retired} of ${ruleCounts.total} rules mastered.</p>
     </div>
 
     <div class="panel">
@@ -554,6 +702,7 @@ function rulesChanged() {
     book = lookupStrategy(hand.playerCards, hand.upcard, state.settings.rules);
     if (answered) answered.correct = answered.action === book.action;
   }
+  if (quiz) { deal(); return; }
   if (view === 'drill') renderDrill({ felt: false });
   if (view === 'chart') renderChart();
   if (view === 'settings') renderSettings();
@@ -576,19 +725,28 @@ $('#themeBtn').addEventListener('click', () => {
 
 $('#rulesChip').addEventListener('click', () => setView('settings'));
 
+$('#modes').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-mode]');
+  if (!btn || btn.dataset.mode === state.settings.mode) return;
+  state.settings.mode = btn.dataset.mode;
+  saveState(state);
+  deal();
+});
+
 // Drill: a tap answers, a long hold answers with low confidence.
 let holdTimer = null;
 let holdFired = false;
 
 $('#answer').addEventListener('pointerdown', (e) => {
-  const btn = e.target.closest('.action');
+  const btn = e.target.closest('.action, .option');
   if (!btn || btn.disabled) return;
   holdFired = false;
   holdTimer = setTimeout(() => {
     holdFired = true;
     buzz(18);
     unsure = true;
-    answer(btn.dataset.action, true);
+    if (btn.dataset.opt !== undefined) answerRule(Number(btn.dataset.opt), true);
+    else answer(btn.dataset.action, true);
   }, 420);
 });
 const clearHold = () => { if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; } };
@@ -601,7 +759,9 @@ $('#answer').addEventListener('click', (e) => {
   if (holdFired) { holdFired = false; return; }
   const act = e.target.closest('.action');
   if (act) { answer(act.dataset.action, false); return; }
-  if (e.target.closest('#unsureBtn')) { unsure = !unsure; renderPending(); return; }
+  const opt = e.target.closest('.option');
+  if (opt) { answerRule(Number(opt.dataset.opt), false); return; }
+  if (e.target.closest('#unsureBtn')) { unsure = !unsure; if (quiz) renderRulePending(); else renderPending(); return; }
   if (e.target.closest('#peekBtn')) { peeked = true; renderPending(); return; }
   if (e.target.closest('#retireBtn')) { retireCurrent(); return; }
   if (e.target.closest('#nextBtn')) { deal(forcedId); forcedId = null; }
@@ -711,6 +871,16 @@ document.addEventListener('keydown', (e) => {
   if ($('#sheetRoot').firstElementChild && e.key === 'Escape') { closeSheet(); return; }
   if (view !== 'drill') return;
   const k = e.key.toLowerCase();
+  if (quiz) {
+    if (quiz.chosen !== null) {
+      if (k === 'enter' || k === ' ' || k === 'n') { e.preventDefault(); deal(); }
+      return;
+    }
+    if (k === 'u') { unsure = !unsure; renderRulePending(); return; }
+    const n = Number(k);
+    if (n >= 1 && n <= quiz.options.length) { e.preventDefault(); answerRule(n - 1, e.shiftKey); }
+    return;
+  }
   if (answered) {
     if (k === 'enter' || k === ' ' || k === 'n') { e.preventDefault(); deal(); }
     return;

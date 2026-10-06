@@ -1,5 +1,5 @@
 import { makeDisplayCard, rankLabel } from './cards.js';
-import { UPCARDS } from './strategy.js';
+import { UPCARDS, rowRule, rowLabel } from './strategy.js';
 
 // Every two-card decision a 4-8 deck chart covers, as a drillable deck.
 // Ids look like h16-9 (hard 16 vs 9), s18-1 (soft 18 vs ace), p10-5 (tens vs 5).
@@ -79,4 +79,56 @@ export function dealScenario(id, rng = Math.random) {
     playerDisplay: values.map((v) => makeDisplayCard(v, rng)),
     dealerDisplay: makeDisplayCard(scenario.upcard, rng),
   };
+}
+
+// --- rule groups -----------------------------------------------------------
+// The reverse drill: rows that share a rule are one answer. "Always hit" is
+// hard 5 through 8, and a pair of fives sits with hard 10 because the chart
+// reads it as one.
+
+function runsOfNumbers(keys) {
+  const runs = [];
+  for (const k of [...keys].sort((a, b) => a - b)) {
+    const last = runs[runs.length - 1];
+    if (last && k === last[last.length - 1] + 1) last.push(k);
+    else runs.push([k]);
+  }
+  return runs;
+}
+
+export function groupLabel(rows) {
+  const parts = [];
+  for (const section of ['hard', 'soft', 'pairs']) {
+    const keys = rows.filter((r) => r.section === section).map((r) => r.key);
+    if (!keys.length) continue;
+    if (section === 'pairs') {
+      parts.push(...keys.sort((a, b) => (a === 1 ? -1 : b === 1 ? 1 : a - b)).map((k) => rowLabel('pairs', k)));
+      continue;
+    }
+    const name = section === 'hard' ? 'Hard' : 'Soft';
+    for (const run of runsOfNumbers(keys)) {
+      parts.push(run.length > 1 ? `${name} ${run[0]}–${run[run.length - 1]}` : `${name} ${run[0]}`);
+    }
+  }
+  return parts.join(' · ');
+}
+
+export function ruleGroups(rules) {
+  const rows = [
+    ...HARD_TOTALS.map((key) => ({ section: 'hard', key })),
+    ...SOFT_TOTALS.map((key) => ({ section: 'soft', key })),
+    ...PAIR_RANKS.map((key) => ({ section: 'pairs', key })),
+  ];
+  const byRule = new Map();
+  for (const row of rows) {
+    const rule = rowRule(row.section, row.key, rules);
+    if (!byRule.has(rule)) byRule.set(rule, []);
+    byRule.get(rule).push(row);
+  }
+  return [...byRule.entries()].map(([rule, group]) => ({
+    id: `R${group[0].section[0]}${group[0].key}`,
+    rule,
+    rows: group,
+    label: groupLabel(group),
+  }));
 }
