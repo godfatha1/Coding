@@ -106,7 +106,7 @@ anywhere and open it; everything works except the service worker.
 npm test
 ```
 
-203 checks across six files:
+192 checks across six files:
 
 - **`test/odds.test.mjs`** — distributions sum to one; dealer bust rates match
   published tables for all ten upcards; the infinite-deck dealer tables for 6 and
