@@ -1,0 +1,10 @@
+# Daily liked-songs sync at 04:17. Install with: crontab -e
+#
+# cron runs with a minimal environment, so set what likesync needs explicitly
+# and use absolute paths.
+LIKESYNC_HOME=/home/YOUR_USER/.local/share/likesync
+LIKESYNC_SPOTIFY_CLIENT_ID=your_spotify_client_id
+LIKESYNC_SOUNDCLOUD_CLIENT_ID=your_soundcloud_client_id
+LIKESYNC_SOUNDCLOUD_CLIENT_SECRET=your_soundcloud_client_secret
+
+17 4 * * * /opt/likesync/venv/bin/likesync sync --log-file "$LIKESYNC_HOME/likesync.log" >> "$LIKESYNC_HOME/cron.log" 2>&1

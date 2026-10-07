@@ -1,0 +1,169 @@
+name: likesync
+
+# Daily two-way sync of Spotify and SoundCloud liked songs.
+#
+# Before this works you need these repository secrets:
+#   LIKESYNC_SPOTIFY_CLIENT_ID
+#   LIKESYNC_SOUNDCLOUD_CLIENT_ID
+#   LIKESYNC_SOUNDCLOUD_CLIENT_SECRET
+#   LIKESYNC_SECRET_KEY   - 32 random bytes, base64. Encrypts the token file
+#                           before it is committed. Required; the job refuses
+#                           to run without it.
+#   LIKESYNC_TOKENS       - output of `likesync tokens export`, run once on a
+#                           machine with a browser. Only needed for the first
+#                           run; delete it afterwards.
+#
+# Read the "Running it in GitHub Actions" section of likesync/README.md first:
+# this commits an encrypted token blob to a branch of this repository, which is
+# only appropriate if you understand that trade-off.
+
+on:
+  schedule:
+    # 04:23 UTC. Not on the hour: scheduled jobs on the hour are the most
+    # delayed, and both APIs are busiest then.
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Plan only, write nothing"
+        type: boolean
+        default: false
+
+# Never let two runs overlap: SoundCloud invalidates a refresh token the moment
+# it is redeemed, so concurrent refreshes would break authentication outright.
+concurrency:
+  group: likesync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      STATE_BRANCH: likesync-state
+      LIKESYNC_HOME: ${{ github.workspace }}/.likesync-state
+      LIKESYNC_SPOTIFY_CLIENT_ID: ${{ secrets.LIKESYNC_SPOTIFY_CLIENT_ID }}
+      LIKESYNC_SOUNDCLOUD_CLIENT_ID: ${{ secrets.LIKESYNC_SOUNDCLOUD_CLIENT_ID }}
+      LIKESYNC_SOUNDCLOUD_CLIENT_SECRET: ${{ secrets.LIKESYNC_SOUNDCLOUD_CLIENT_SECRET }}
+      LIKESYNC_SECRET_KEY: ${{ secrets.LIKESYNC_SECRET_KEY }}
+      LIKESYNC_TOKENS: ${{ secrets.LIKESYNC_TOKENS }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require an encryption key
+        run: |
+          if [ -z "${LIKESYNC_SECRET_KEY}" ]; then
+            echo "::error::LIKESYNC_SECRET_KEY is not set. The token file is" \
+                 "committed to the ${STATE_BRANCH} branch, so it must be" \
+                 "encrypted at rest. Generate one with:" \
+                 "python3 -c 'import os,base64;print(base64.urlsafe_b64encode(os.urandom(32)).decode())'"
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install likesync
+        run: pip install --quiet './likesync[crypt]'
+
+      - name: Restore sync state
+        run: |
+          mkdir -p "$LIKESYNC_HOME"
+          if git fetch --depth=1 origin "$STATE_BRANCH" 2>/dev/null; then
+            # `git show branch:path` pulls files out without a checkout.
+            git show "FETCH_HEAD:state.sqlite3" > "$LIKESYNC_HOME/state.sqlite3" \
+              2>/dev/null || rm -f "$LIKESYNC_HOME/state.sqlite3"
+            git show "FETCH_HEAD:tokens.json" > "$LIKESYNC_HOME/tokens.json" \
+              2>/dev/null || rm -f "$LIKESYNC_HOME/tokens.json"
+            [ -f "$LIKESYNC_HOME/tokens.json" ] && chmod 600 "$LIKESYNC_HOME/tokens.json"
+            echo "Restored state from $STATE_BRANCH."
+          else
+            echo "No $STATE_BRANCH branch yet; this is a first run."
+          fi
+          # Without a stored token file, fall back to the one-time seed secret.
+          if [ ! -f "$LIKESYNC_HOME/tokens.json" ] && [ -z "$LIKESYNC_TOKENS" ]; then
+            echo "::error::No stored tokens and LIKESYNC_TOKENS is empty." \
+                 "Run 'likesync login spotify' and 'likesync login soundcloud'" \
+                 "locally, then 'likesync tokens export' and save the output as" \
+                 "the LIKESYNC_TOKENS secret."
+            exit 1
+          fi
+
+      - name: Sync
+        id: sync
+        run: |
+          ARGS="sync"
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            ARGS="sync --dry-run"
+          fi
+          set +e
+          likesync $ARGS --json > report.json
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, pathlib
+          data = json.loads(pathlib.Path("report.json").read_text())
+          c = data["counts"]
+          print(f"## likesync run #{data['run_id']} — {data['status']}\n")
+          print(f"- Spotify library: **{c.get('spotify_library', 0)}**")
+          print(f"- SoundCloud library: **{c.get('soundcloud_library', 0)}**")
+          print(f"- Applied: **{len(data['applied'])}**, "
+                f"failed: **{len(data['failed'])}**, "
+                f"unmatched: **{len(data['unmatched'])}**")
+          if data["aborted"]:
+              print(f"\n> **Aborted:** {data['aborted']}")
+          for w in data["warnings"]:
+              print(f"\n> {w}")
+          if data["applied"]:
+              print("\n<details><summary>Changes</summary>\n")
+              for a in data["applied"]:
+                  sign = "+" if a["action"] == "like" else "-"
+                  print(f"- `{sign}` {a['provider']}: {a['label']}")
+              print("\n</details>")
+          PY
+          # 3 means "some writes failed"; they retry tomorrow, so do not fail
+          # the job. 4 means a safety rail aborted the run, which is worth a red X.
+          if [ "$code" = "3" ]; then exit 0; fi
+          exit $code
+
+      - name: Save sync state
+        # Always persist: a partial run still rotated tokens, and losing a
+        # rotated SoundCloud refresh token means re-authorising by hand.
+        if: always() && github.event.inputs.dry_run != 'true'
+        run: |
+          [ -f "$LIKESYNC_HOME/state.sqlite3" ] || exit 0
+          TMP="$(mktemp -d)"
+          cp "$LIKESYNC_HOME/state.sqlite3" "$TMP/"
+          [ -f "$LIKESYNC_HOME/tokens.json" ] && cp "$LIKESYNC_HOME/tokens.json" "$TMP/"
+          # Refuse to commit a token file that is not encrypted.
+          if [ -f "$TMP/tokens.json" ] && ! grep -q '"enc"' "$TMP/tokens.json"; then
+            echo "::error::tokens.json is not encrypted; refusing to commit it."
+            exit 1
+          fi
+          cd "$TMP"
+          git init -q -b "$STATE_BRANCH"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "likesync state $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # A single-commit force push keeps the branch from growing without
+          # bound; this is state, not history.
+          git push -q --force \
+            "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" \
+            "$STATE_BRANCH"
+          echo "Saved state to $STATE_BRANCH."
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: likesync-report
+          path: report.json
+          if-no-files-found: ignore
+          retention-days: 30

@@ -1,0 +1,85 @@
+# likesync configuration.
+#
+# Copy to ~/.local/share/likesync/config.toml (or ./likesync.toml, or point at
+# it with --config / LIKESYNC_CONFIG). Every value below is optional except the
+# client credentials, and every key can also be set from the environment as
+# LIKESYNC_<SECTION>_<KEY>, e.g. LIKESYNC_SPOTIFY_CLIENT_ID.
+
+# Where state.sqlite3 and tokens.json live.
+# home = "~/.local/share/likesync"
+
+[spotify]
+client_id = "PUT_YOUR_SPOTIFY_CLIENT_ID_HERE"
+# Leave client_secret empty to use PKCE, which is what you want for a personal
+# app. Only set it if you registered a confidential app.
+# client_secret = ""
+# Must match the redirect URI registered in your Spotify app *exactly*.
+# Spotify requires the loopback IP, not "localhost".
+redirect_uri = "http://127.0.0.1:8765/callback"
+# "auto" probes PUT /me/library (current) and falls back to PUT /me/tracks
+# (pre-February-2026). Pin it to "library" or "tracks" to skip the probe.
+# write_mode = "auto"
+
+[soundcloud]
+client_id = "PUT_YOUR_SOUNDCLOUD_CLIENT_ID_HERE"
+# SoundCloud treats every client as confidential, so the secret is required
+# even though we use PKCE.
+client_secret = "PUT_YOUR_SOUNDCLOUD_CLIENT_SECRET_HERE"
+redirect_uri = "http://127.0.0.1:8765/callback"
+# SoundCloud documents the "OAuth" authorization scheme rather than "Bearer".
+# If you get a 401 with a token you know is good, try "Bearer".
+# auth_scheme = "OAuth"
+# "auto" probes POST /likes/tracks/{id} then PUT /me/favorites/{id}.
+# write_mode = "auto"
+
+[sync]
+# both | to-spotify | to-soundcloud
+direction = "both"
+
+# Mirror removals as well as additions. This is what makes it a real two-way
+# sync. Set false if you only ever want likes to propagate.
+propagate_unlikes = true
+
+# Matching confidence. At or above accept_threshold the pair is linked
+# automatically; between review_threshold and accept_threshold it is parked for
+# you to confirm with `likesync link`; below that it is reported as unmatched.
+# Raise accept_threshold if you see a bad match; lower it if too little links.
+accept_threshold = 0.78
+review_threshold = 0.62
+
+# How far apart two durations may be before a pair is rejected outright.
+duration_tolerance_ms = 10000
+
+# --- safety rails ---------------------------------------------------------
+# These exist because a bad match or a truncated API read could otherwise
+# delete a library. Leave them on unless you know why you are changing them.
+
+# Abort the run if a library comes back smaller than this fraction of what it
+# was last run. A truncated API response is indistinguishable from a mass
+# unlike, and this is what stops us acting on one.
+min_library_ratio = 0.5
+
+# If a run plans more unlikes than this, skip all of them and warn. They are
+# retried on the next run, so raising the limit later still applies them.
+max_unlikes_per_run = 50
+
+# Cap total writes and searches per run to stay inside API rate limits.
+max_writes_per_run = 300
+max_searches_per_run = 400
+
+# Re-attempt a track that has no counterpart only this often. New uploads
+# appear over time, so unmatched tracks are retried rather than given up on.
+retry_unmatched_after_days = 14
+
+# What to do when the same track was liked on one side and unliked on the
+# other since the last run. "like_wins" keeps it; "skip" leaves both as they
+# are and reports it.
+conflict = "like_wins"
+
+# Skip anything longer than this (0 disables). Useful for keeping hour-long DJ
+# sets and podcasts out of the matcher. 900000 = 15 minutes.
+# skip_longer_than_ms = 0
+
+[http]
+timeout = 30
+max_retries = 5

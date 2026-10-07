@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- macOS. Install with:
+       cp deploy/com.likesync.daily.plist ~/Library/LaunchAgents/
+       launchctl load ~/Library/LaunchAgents/com.likesync.daily.plist
+     Edit the paths and credentials first. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.likesync.daily</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/opt/likesync/venv/bin/likesync</string>
+    <string>sync</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>LIKESYNC_HOME</key>
+    <string>/Users/YOUR_USER/Library/Application Support/likesync</string>
+    <key>LIKESYNC_SPOTIFY_CLIENT_ID</key>
+    <string>your_spotify_client_id</string>
+    <key>LIKESYNC_SOUNDCLOUD_CLIENT_ID</key>
+    <string>your_soundcloud_client_id</string>
+    <key>LIKESYNC_SOUNDCLOUD_CLIENT_SECRET</key>
+    <string>your_soundcloud_client_secret</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>4</integer>
+    <key>Minute</key><integer>17</integer>
+  </dict>
+  <!-- Run on wake if the machine was asleep at 04:17. -->
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>/Users/YOUR_USER/Library/Logs/likesync.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOUR_USER/Library/Logs/likesync.log</string>
+</dict>
+</plist>

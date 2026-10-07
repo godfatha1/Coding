@@ -1,0 +1,36 @@
+# /etc/systemd/system/likesync.service
+[Unit]
+Description=Sync Spotify and SoundCloud liked songs
+Documentation=https://github.com/godfatha1/coding/tree/main/likesync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=likesync
+Group=likesync
+Environment=LIKESYNC_HOME=/var/lib/likesync
+# Keep credentials out of the unit file: put LIKESYNC_SPOTIFY_CLIENT_ID etc.
+# in this file, mode 0600, owned by the likesync user.
+EnvironmentFile=-/etc/likesync/env
+ExecStart=/opt/likesync/venv/bin/likesync sync
+# A partial run (exit 3) is not a failure worth alerting on; it retries daily.
+SuccessExitStatus=3
+
+# Hardening: this process needs the network and one state directory.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/var/lib/likesync
+
+[Install]
+WantedBy=multi-user.target

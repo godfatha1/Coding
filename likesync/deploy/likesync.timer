@@ -1,0 +1,15 @@
+# /etc/systemd/system/likesync.timer
+#   sudo systemctl enable --now likesync.timer
+#   systemctl list-timers likesync.timer
+[Unit]
+Description=Daily Spotify/SoundCloud liked-songs sync
+
+[Timer]
+OnCalendar=daily
+# Spread the load and avoid hitting both APIs exactly at midnight.
+RandomizedDelaySec=1h
+# Catch up if the machine was asleep or off at the scheduled time.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

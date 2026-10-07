@@ -1,0 +1,21 @@
+# Python build and tool artifacts
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+venv/
+.venv/
+
+# Local runtime state. Never commit these: tokens.json holds live OAuth
+# credentials for both accounts.
+likesync.toml
+config.toml
+tokens.json
+tokens.json.*
+state.sqlite3*
+report.json

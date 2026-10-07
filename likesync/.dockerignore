@@ -1,0 +1,5 @@
+tests/
+deploy/
+.github/
+*.sqlite3
+tokens.json

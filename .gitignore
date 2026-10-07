@@ -2,3 +2,11 @@ node_modules/
 dist/shots/
 dist/site/
 dist/*.zip
+
+# likesync: credentials and sync state are never committed.
+# See likesync/.gitignore for the rest.
+tokens.json
+tokens.json.*
+*.sqlite3
+.likesync-state/
+report.json
