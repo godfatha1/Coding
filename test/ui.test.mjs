@@ -300,6 +300,79 @@ await page.locator('.tab[data-view="drill"]').click();
 await page.waitForSelector('#answer .action');
 say(await page.locator('#bankbar').isHidden(), 'turning money off hides the bankroll again');
 
+// --- counting the shoe ---
+await page.locator('.tab[data-view="settings"]').click();
+await page.locator('[data-opt="counting"]').click();
+say(await page.locator('[data-opt="table"]').getAttribute('aria-checked') === 'true', 'counting switches the money game on with it');
+await page.locator('[data-opt="cevery:3"]').click();
+await page.locator('.tab[data-view="drill"]').click();
+await page.waitForSelector('#answer .action');
+say(!(await page.locator('#countbar').isHidden()), 'the count bar appears');
+say(/\u2022\u2022/.test(await page.locator('#countbar').innerText()), 'the count is hidden until you ask for it');
+await page.locator('#countPeek').click();
+const barShown = await page.locator('#countbar').innerText();
+say(!/\u2022\u2022/.test(barShown), `tapping Show reveals it (${barShown.replace(/\n/g, ' ')})`);
+
+const playOut = async () => {
+  await page.locator('#answer .action').first().click();
+  await page.waitForSelector('#answer .live, #answer .settle');
+  let g = 0;
+  while (await page.locator('#answer .live').count() && g++ < 14) {
+    const stand = page.locator('[data-play="stand"]');
+    if (await stand.count()) await stand.click(); else await page.locator('[data-play]').first().click();
+    await page.waitForTimeout(15);
+  }
+  await page.waitForSelector('.settle');
+};
+
+// The count must equal the Hi-Lo value of every card showing on a fresh shoe.
+const hiloOf = (ranks) => ranks.reduce((n, r) => {
+  const v = r === 'A' ? 1 : ['J', 'Q', 'K', '10'].includes(r) ? 10 : Number(r);
+  return n + (v >= 2 && v <= 6 ? 1 : v === 1 || v === 10 ? -1 : 0);
+}, 0);
+await playOut();
+const faceUp = await page.locator('#felt .card:not(.back) .r').allTextContents();
+const barCount = Number((await page.locator('#countbar').innerText()).match(/Running\s*([+\u2212]?\d+)/i)[1].replace('\u2212', '-'));
+say(barCount === hiloOf(faceUp), `the running count matches the cards on the table (${faceUp.join('+')} = ${hiloOf(faceUp)}, bar says ${barCount})`);
+
+// After three hands it asks for the count.
+await page.locator('#nextBtn').click();
+await page.waitForSelector('#answer .action');
+await playOut();
+await page.locator('#nextBtn').click();
+await page.waitForSelector('#answer .action');
+await playOut();
+const truth = Number((await page.locator('#countbar').innerText()).match(/Running\s*([+\u2212]?\d+)/i)[1].replace('\u2212', '-'));
+await page.locator('#nextBtn').click();
+await page.waitForSelector('.stepper, #answer .action');
+say(await page.locator('.stepper').count() === 1, 'it stops to ask for the running count');
+say(/\u2022\u2022/.test(await page.locator('#countbar').innerText()), 'the bar hides the answer while it is asking');
+for (let i = 0; i < Math.abs(truth); i += 1) await page.locator(`[data-step="${truth > 0 ? 1 : -1}"]`).click();
+await page.waitForTimeout(300);
+await page.screenshot({ path: join(shots, 'count-check.png'), fullPage: true });
+await page.locator('#countCheckBtn').click();
+await page.waitForSelector('#answer .verdict');
+say(await page.locator('#answer .verdict.good').count() === 1, `answering with the true count is marked right (${truth})`);
+say(/True count/.test(await page.locator('#answer .verdict-sub').innerText()), 'the true count is shown with it');
+await page.locator('#nextBtn').click();
+await page.waitForSelector('#answer .action');
+say(await page.locator('.stepper').count() === 0, 'the drill carries on after the check');
+
+await page.locator('.tab[data-view="stats"]').click();
+await page.waitForSelector('.tiles');
+const countPanel = await page.locator('.panel').filter({ hasText: 'Counting' }).first().innerText();
+say(/100%|0%/.test(countPanel), `the counting panel reports accuracy (${countPanel.split('\n').slice(0, 4).join(' ').trim()})`);
+
+await page.locator('.tab[data-view="settings"]').click();
+await page.locator('[data-opt="counting"]').click();
+await page.locator('.tab[data-view="drill"]').click();
+await page.waitForSelector('#answer .action');
+say(await page.locator('#countbar').isHidden(), 'turning counting off hides the bar');
+await page.locator('.tab[data-view="settings"]').click();
+await page.locator('[data-opt="table"]').click();
+await page.locator('.tab[data-view="drill"]').click();
+await page.waitForSelector('#answer .action');
+
 // --- a wide screen still works ---
 await page.setViewportSize({ width: 900, height: 820 });
 await page.locator('.tab[data-view="drill"]').click();

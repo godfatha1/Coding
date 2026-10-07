@@ -617,6 +617,31 @@ details.compare[open] > summary::after { transform: rotate(180deg); }
 .bank-chart .ax.dim { fill: var(--line-strong); }
 .bank-chart .ax.end { font-weight: 800; fill: var(--fg); }
 
+/* ---------- counting ---------- */
+.countbar {
+  display: flex; align-items: center; gap: 14px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 9px 12px;
+}
+.count-cell { display: grid; gap: 1px; }
+.count-cell .cap { font-size: 9.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.count-cell b { font: 700 16px/1 var(--font-display); font-variant-numeric: tabular-nums; }
+.peek {
+  margin-left: auto; appearance: none; border: 1px solid var(--line-strong); background: var(--surface-3);
+  color: var(--fg-2); border-radius: 8px; padding: 6px 11px; font-size: 12px; font-weight: 650; cursor: pointer;
+}
+.count-guess { margin: 2px 0 0; font: 800 44px/1 var(--font-display); letter-spacing: -.03em; }
+.stepper { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.step {
+  appearance: none; min-height: 52px; border: 1px solid var(--line-strong); background: var(--surface);
+  border-radius: 11px; font: 700 16px/1 var(--font-ui); font-variant-numeric: tabular-nums; cursor: pointer;
+  touch-action: manipulation;
+}
+.step:active { background: var(--surface-2); }
+.shuffle {
+  margin: 0 0 2px; font-size: 12px; font-weight: 650; color: var(--accent);
+  background: var(--accent-soft); border-radius: 8px; padding: 6px 9px;
+}
+
 </style>
 <div class="app">
   <header class="topbar">
@@ -635,6 +660,7 @@ details.compare[open] > summary::after { transform: rotate(180deg); }
     <section class="pane-inner" id="view-drill" role="tabpanel" aria-label="Drill">
       <div class="strip" id="strip"></div>
       <div class="bankbar" id="bankbar" hidden></div>
+      <div class="countbar" id="countbar" hidden></div>
       <div class="segs" id="modes" role="group" aria-label="Drill style"></div>
       <div class="panel felt" id="felt"></div>
       <div id="answer"></div>
@@ -1531,7 +1557,80 @@ function pickNext(cards, { step, lastId = null, sinceNew = 0, workingSet = 16, n
   return pickFrom(live.filter((c) => c.due === soonest)) || live[0];
 }
 
+/* src/engine/shoe.js */
+// A shoe that lives across hands, which is what makes a count mean anything.
+//
+// The drill still chooses which hand you are dealt, so those cards are pulled
+// out of this shoe by rank rather than taken off the top. Everything else comes
+// off the top in order. Either way the cards really do leave the shoe, so the
+// count of what has been seen stays honest.
+
+function newShoe(decks, rng = Math.random) {
+  const cards = [];
+  for (let d = 0; d < decks; d += 1) {
+    for (let v = 1; v <= 10; v += 1) {
+      for (let n = v === 10 ? 16 : 4; n > 0; n -= 1) cards.push(v);
+    }
+  }
+  for (let i = cards.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(rng() * (i + 1));
+    [cards[i], cards[j]] = [cards[j], cards[i]];
+  }
+  return { cards, decks, initial: decks * 52 };
+}
+
+const cardsLeft = (shoe) => shoe.cards.length;
+const cardsDealt = (shoe) => shoe.initial - shoe.cards.length;
+const penetrationSoFar = (shoe) => cardsDealt(shoe) / shoe.initial;
+const needsShuffle = (shoe, penetration) => penetrationSoFar(shoe) >= penetration;
+
+function drawFrom(shoe) {
+  return shoe.cards.pop();
+}
+
+// Take a named rank out of the shoe. Returns false when the shoe has none left,
+// which is the caller's cue to shuffle.
+//
+// The copy removed is chosen at random, never the nearest one. Taking it off
+// the top strips that rank out of exactly the cards about to be dealt: pulling
+// the drill's two tens and a six that way dropped the player's bust rate on
+// 16 against a ten from 62% to 39%, because the next card could no longer be
+// one of the tens just removed.
+function pullRank(shoe, value, rng = Math.random) {
+  const spots = [];
+  for (let i = 0; i < shoe.cards.length; i += 1) if (shoe.cards[i] === value) spots.push(i);
+  if (!spots.length) return false;
+  shoe.cards.splice(spots[Math.floor(rng() * spots.length)], 1);
+  return true;
+}
+
+// Draw a card that is not the given rank, for a hole card that cannot make
+// blackjack. It has to be picked at random from every card that qualifies, not
+// by skipping down from the top: skipping leaves the rejected cards sitting
+// where they were, so they land on the very next draw instead. Doing that with
+// aces against a ten upcard handed the player an ace 14.9% of the time against
+// a true 7.8%.
+function pullExcluding(shoe, excluded, rng = Math.random) {
+  const spots = [];
+  for (let i = 0; i < shoe.cards.length; i += 1) if (shoe.cards[i] !== excluded) spots.push(i);
+  if (!spots.length) return drawFrom(shoe);
+  const at = spots[Math.floor(rng() * spots.length)];
+  const card = shoe.cards[at];
+  shoe.cards.splice(at, 1);
+  return card;
+}
+
+function canDeal(shoe, values) {
+  const need = new Map();
+  for (const v of values) need.set(v, (need.get(v) || 0) + 1);
+  const have = new Map();
+  for (const v of shoe.cards) have.set(v, (have.get(v) || 0) + 1);
+  for (const [v, n] of need) if ((have.get(v) || 0) < n) return false;
+  return true;
+}
+
 /* src/engine/game.js */
+
 
 
 // Playing the hand out for money.
@@ -1546,41 +1645,32 @@ function pickNext(cards, { step, lastId = null, sinceNew = 0, workingSet = 16, n
 // leaving blackjack out of both sides keeps the money consistent with every
 // number on screen instead of quietly running worse than them.
 
-function createShoe(decks, exclude = [], rng = Math.random) {
-  const cards = [];
-  for (let d = 0; d < decks; d += 1) {
-    for (let v = 1; v <= 10; v += 1) {
-      for (let n = v === 10 ? 16 : 4; n > 0; n -= 1) cards.push(v);
-    }
-  }
-  for (const c of exclude) {
-    const i = cards.indexOf(c);
-    if (i >= 0) cards.splice(i, 1);
-  }
-  for (let i = cards.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(rng() * (i + 1));
-    [cards[i], cards[j]] = [cards[j], cards[i]];
-  }
-  return cards;
-}
-
 const newHand = (cards, bet, fromSplit = false) => ({
   cards: [...cards], bet, doubled: false, stood: false, bust: false, surrendered: false, fromSplit,
 });
 
 const handDone = (h) => h.stood || h.bust || h.surrendered;
 
-function startRound({ playerCards, upcard, rules, bet = 1, rng = Math.random }) {
-  const shoe = createShoe(rules.decks, [...playerCards, upcard], rng);
+// With no shoe passed in, the round gets a private one. Counting hands over a
+// persistent shoe instead, so the cards that leave it stay gone.
+function startRound({ playerCards, upcard, rules, bet = 1, rng = Math.random, shoe = null }) {
+  const live = shoe || newShoe(rules.decks, rng);
+  const taken = [];
+  for (const c of [...playerCards, upcard]) { if (pullRank(live, c)) taken.push(c); }
+
+  // Post-peek: the hole card is never the one that would make blackjack.
   const natural = upcard === 1 ? 10 : upcard === 10 ? 1 : null;
-  let at = shoe.length - 1;
-  while (natural !== null && at >= 0 && shoe[at] === natural) at -= 1;
-  const hole = shoe.splice(at, 1)[0];
+  const hole = natural === null ? drawFrom(live) : pullExcluding(live, natural, rng);
+  const holeIndex = taken.length;
+  taken.push(hole);
 
   return {
     rules,
     bet,
-    shoe,
+    shoe: live,
+    ownShoe: !shoe,
+    taken,
+    holeIndex,
     hole,
     upcard,
     dealerCards: [upcard],
@@ -1590,6 +1680,13 @@ function startRound({ playerCards, upcard, rules, bet = 1, rng = Math.random }) 
     stage: 'player',
     result: null,
   };
+}
+
+// Everything the player can see right now. The hole card sits in the taken list
+// from the start but stays out of this until it is turned over.
+function exposedCards(game) {
+  if (game.revealed) return [...game.taken];
+  return game.taken.filter((_, i) => i !== game.holeIndex);
 }
 
 function activeHand(game) {
@@ -1609,7 +1706,11 @@ function legalMoves(game) {
   return moves;
 }
 
-const draw = (game) => game.shoe.pop();
+function draw(game) {
+  const card = drawFrom(game.shoe);
+  game.taken.push(card);
+  return card;
+}
 
 function advance(game) {
   while (game.active < game.hands.length && handDone(game.hands[game.active])) game.active += 1;
@@ -1689,6 +1790,111 @@ function act(game, action) {
   return game;
 }
 
+/* src/engine/counting.js */
+// Card counting.
+//
+// A count system is just a value per rank plus a little bookkeeping, so the
+// engine is generic and adding a system is data rather than code. Only Hi-Lo is
+// turned on; the rest are here with their real tag values so the training modes
+// planned around them have something to build on.
+//
+// Where this is heading, roughly in order:
+//   1. running count            <- built
+//   2. true count conversion    (running / decks left, asked separately)
+//   3. bet ramp by true count   (how much to put out at each count)
+//   4. deviations               (Illustrious 18 and Fab 4, chart cells that move)
+//   5. level-two systems        (Omega II, Zen: two-point tags, slower but sharper)
+//   6. side counts              (aces kept apart from the main count)
+
+const COUNT_SYSTEMS = {
+  hilo: {
+    id: 'hilo',
+    name: 'Hi-Lo',
+    level: 1,
+    ready: true,
+    balanced: true,
+    blurb: 'Low cards +1, tens and aces −1. The one almost everybody learns first.',
+    values: { 1: -1, 2: 1, 3: 1, 4: 1, 5: 1, 6: 1, 7: 0, 8: 0, 9: 0, 10: -1 },
+  },
+  ko: {
+    id: 'ko',
+    name: 'Knock-Out',
+    level: 1,
+    ready: false,
+    balanced: false,
+    blurb: 'Hi-Lo with the seven counted as low, so there is no true count to work out.',
+    values: { 1: -1, 2: 1, 3: 1, 4: 1, 5: 1, 6: 1, 7: 1, 8: 0, 9: 0, 10: -1 },
+    initial: (decks) => -4 * (decks - 1),
+  },
+  hiopt1: {
+    id: 'hiopt1',
+    name: 'Hi-Opt I',
+    level: 1,
+    ready: false,
+    balanced: true,
+    blurb: 'Aces and deuces sit out, which sharpens play but wants a side count for betting.',
+    values: { 1: 0, 2: 0, 3: 1, 4: 1, 5: 1, 6: 1, 7: 0, 8: 0, 9: 0, 10: -1 },
+  },
+  omega2: {
+    id: 'omega2',
+    name: 'Omega II',
+    level: 2,
+    ready: false,
+    balanced: true,
+    blurb: 'Two-point tags on the middle cards. More accurate, much harder to hold.',
+    values: { 1: 0, 2: 1, 3: 1, 4: 2, 5: 2, 6: 2, 7: 1, 8: 0, 9: -1, 10: -2 },
+  },
+  zen: {
+    id: 'zen',
+    name: 'Zen Count',
+    level: 2,
+    ready: false,
+    balanced: true,
+    blurb: 'Two-point tags with the ace counted at −1, so no side count is needed.',
+    values: { 1: -1, 2: 1, 3: 1, 4: 2, 5: 2, 6: 2, 7: 1, 8: 0, 9: 0, 10: -2 },
+  },
+};
+
+const readySystems = () => Object.values(COUNT_SYSTEMS).filter((s) => s.ready);
+const getSystem = (id) => (COUNT_SYSTEMS[id]?.ready ? COUNT_SYSTEMS[id] : COUNT_SYSTEMS.hilo);
+
+const countValue = (system, card) => system.values[card] ?? 0;
+
+function startingCount(system, decks) {
+  return system.balanced ? 0 : system.initial(decks);
+}
+
+function runningCount(system, cards, decks) {
+  let n = startingCount(system, decks);
+  for (const c of cards) n += countValue(system, c);
+  return n;
+}
+
+// A balanced count has to be divided by the decks still to come. Half-deck
+// resolution is what people actually estimate at a table, so that is the
+// granularity offered rather than pretending to count cards.
+function decksRemaining(cardsLeft, { round = 0.5 } = {}) {
+  const decks = cardsLeft / 52;
+  if (!round) return decks;
+  return Math.max(round, Math.round(decks / round) * round);
+}
+
+function trueCount(system, running, cardsLeft) {
+  if (!system.balanced) return null;
+  return running / decksRemaining(cardsLeft);
+}
+
+const formatCount = (n) => (n > 0 ? `+${n}` : n < 0 ? `−${Math.abs(n)}` : '0');
+const formatTrue = (n) => (n === null ? '—' : `${n > 0.049 ? '+' : n < -0.049 ? '−' : ''}${Math.abs(n).toFixed(1)}`);
+
+// A balanced system's tags must cancel over a whole deck, or the true count
+// means nothing. This is the check every system in the table has to pass.
+function tagsBalance(system) {
+  let sum = 0;
+  for (let v = 1; v <= 10; v += 1) sum += countValue(system, v) * (v === 10 ? 16 : 4);
+  return sum;
+}
+
 /* src/app/store.js */
 
 
@@ -1702,11 +1908,16 @@ const DEFAULT_SETTINGS = {
   mode: 'play',          // 'play' = name the action, 'hands' = name the hands, 'mix' = both
   table: false,          // play the hand out for money after the graded call
   bet: 25,
+  counting: { on: false, system: 'hilo', show: false, every: 5, penetration: 0.75 },
   theme: 'system',
   haptics: true,
   oddsUpFront: false,
   chartProgress: true,
 };
+
+function freshCount() {
+  return { running: 0, seen: 0, beforeRound: 0, seenBefore: 0, sinceCheck: 0, checks: 0, correct: 0, error: 0, shoes: 0 };
+}
 
 function freshBank(start) {
   return { start, balance: start, hands: 0, wagered: 0, won: 0, lost: 0, pushed: 0, peak: start, low: start, history: [start] };
@@ -1739,6 +1950,8 @@ function freshState() {
     ruleCards: {},
     lifetime: { answered: 0, correct: 0, shaky: 0, bestStreak: 0 },
     bank: freshBank(1000),
+    count: freshCount(),
+    shoe: null,
     session: { answered: 0, correct: 0, streak: 0, recent: [] },
   };
 }
@@ -1754,9 +1967,16 @@ function loadState() {
   const state = {
     ...base,
     ...saved,
-    settings: { ...base.settings, ...(saved.settings || {}), rules: normalizeRules(saved.settings?.rules) },
+    settings: {
+      ...base.settings,
+      ...(saved.settings || {}),
+      rules: normalizeRules(saved.settings?.rules),
+      counting: { ...base.settings.counting, ...(saved.settings?.counting || {}) },
+    },
     lifetime: { ...base.lifetime, ...(saved.lifetime || {}) },
     bank: saneBank(saved.bank, base.bank),
+    count: { ...base.count, ...(saved.count || {}) },
+    shoe: saneShoe(saved.shoe),
     session: { ...base.session },
     cards: {},
     ruleCards: {},
@@ -1783,6 +2003,7 @@ function saveState(state) {
     localStorage.setItem(KEY, JSON.stringify({
       version: 1, settings: state.settings, step: state.step, sinceNew: state.sinceNew,
       cards, ruleCards: state.ruleCards, lifetime: state.lifetime, bank: state.bank,
+      count: state.count, shoe: state.shoe,
     }));
     return true;
   } catch { return false; }
@@ -1815,6 +2036,14 @@ function saneBank(saved, fallback) {
   return bank;
 }
 
+// The shoe is kept across reloads so the count cannot be wiped by refreshing.
+function saneShoe(saved) {
+  if (!saved || !Array.isArray(saved.cards) || !saved.cards.length) return null;
+  const cards = saved.cards.filter((c) => Number.isInteger(c) && c >= 1 && c <= 10);
+  if (!cards.length) return null;
+  return { cards, decks: Number(saved.decks) || 6, initial: Number(saved.initial) || cards.length };
+}
+
 function clearProgress(state) {
   state.cards = {};
   state.ruleCards = {};
@@ -1822,6 +2051,8 @@ function clearProgress(state) {
   state.sinceNew = 0;
   state.lifetime = { answered: 0, correct: 0, shaky: 0, bestStreak: 0 };
   state.bank = freshBank(state.bank?.start ?? 1000);
+  state.count = freshCount();
+  state.shoe = null;
   state.session = { answered: 0, correct: 0, streak: 0, recent: [] };
   saveState(state);
 }
@@ -1831,6 +2062,7 @@ function exportJSON(state) {
     version: 1, exported: new Date().toISOString(),
     settings: state.settings, step: state.step, sinceNew: state.sinceNew,
     cards: state.cards, ruleCards: state.ruleCards, lifetime: state.lifetime, bank: state.bank,
+    count: state.count,
   }, null, 1);
 }
 
@@ -1840,11 +2072,18 @@ function importJSON(text) {
   const base = freshState();
   const state = {
     ...base,
-    settings: { ...base.settings, ...(parsed.settings || {}), rules: normalizeRules(parsed.settings?.rules) },
+    settings: {
+      ...base.settings,
+      ...(parsed.settings || {}),
+      rules: normalizeRules(parsed.settings?.rules),
+      counting: { ...base.settings.counting, ...(parsed.settings?.counting || {}) },
+    },
     step: Number(parsed.step) || 0,
     sinceNew: Number(parsed.sinceNew) || 0,
     lifetime: { ...base.lifetime, ...(parsed.lifetime || {}) },
     bank: saneBank(parsed.bank, base.bank),
+    count: { ...base.count, ...(parsed.count || {}) },
+    shoe: null,
     cards: {},
     ruleCards: {},
   };
@@ -1924,6 +2163,8 @@ const cardBack = '<div class="card back" aria-label="Dealer hole card, face down
 
 
 
+
+
 const $ = (sel) => document.querySelector(sel);
 const state = loadState();
 let hand = null;          // { scenario, playerCards, upcard, ... }
@@ -1938,6 +2179,8 @@ let view = 'drill';
 let chartSelection = null;
 let quiz = null;          // the reverse question: a rule, four groups, one right
 let round = null;         // the hand being played out for money, in table mode
+let countCheck = null;    // the running-count question between hands
+let freshShoe = false;    // a shuffle happened before this hand
 
 const MODES = [
   { id: 'play', label: 'Name the play' },
@@ -1968,6 +2211,35 @@ const moneySigned = (n) => `${n > 0 ? '+' : n < 0 ? '\u2212' : ''}$${Math.abs(Ma
 
 // Drawn cards keep the suit they were first shown with, so a redraw of the
 // screen does not reshuffle the table.
+const countingOn = () => state.settings.table && state.settings.counting.on;
+const countSystem = () => getSystem(state.settings.counting.system);
+
+// Reshuffle when the shoe is past its penetration, when the deck count changes,
+// or when it cannot supply the hand the drill wants. Returns true on a shuffle.
+function ensureShoe(need) {
+  const { decks } = state.settings.rules;
+  const c = state.settings.counting;
+  const stale = !state.shoe || state.shoe.decks !== decks
+    || needsShuffle(state.shoe, c.penetration) || !canDeal(state.shoe, need);
+  if (!stale) return false;
+  state.shoe = newShoe(decks);
+  const base = startingCount(countSystem(), decks);
+  Object.assign(state.count, { running: base, beforeRound: base, seen: 0, seenBefore: 0, shoes: state.count.shoes + 1 });
+  return true;
+}
+
+// The running count is rebuilt from the round each time rather than nudged, so
+// turning the hole card or splitting a hand cannot double-count anything.
+function syncCount() {
+  if (!countingOn() || !round) return;
+  const system = countSystem();
+  const seen = exposedCards(round);
+  let tally = 0;
+  for (const card of seen) tally += countValue(system, card);
+  state.count.running = state.count.beforeRound + tally;
+  state.count.seen = state.count.seenBefore + seen.length;
+}
+
 function syncDisplay() {
   if (!round) return;
   round.display = round.display || { dealer: [], hands: [] };
@@ -2038,6 +2310,16 @@ function dealRule() {
 }
 
 function deal(id) {
+  // Ask for the count before dealing, while the shoe still holds what you saw.
+  if (!id && countingOn() && state.count.seen > 0 && state.count.sinceCheck >= state.settings.counting.every) {
+    countCheck = { guess: 0, answered: false };
+    hand = null;
+    quiz = null;
+    round = null;
+    renderDrill();
+    return;
+  }
+  countCheck = null;
   if (!id && wantsRuleQuestion()) { dealRule(); return; }
   quiz = null;
   const deck = filteredDeck();
@@ -2049,9 +2331,21 @@ function deal(id) {
   hand = dealScenario(pick.id);
   analysis = analyzeHand(hand.playerCards, hand.upcard, state.settings.rules);
   book = lookupStrategy(hand.playerCards, hand.upcard, state.settings.rules);
-  round = state.settings.table
-    ? startRound({ playerCards: hand.playerCards, upcard: hand.upcard, rules: state.settings.rules, bet: state.settings.bet })
-    : null;
+  if (state.settings.table) {
+    const counting = countingOn();
+    freshShoe = counting ? ensureShoe([...hand.playerCards, hand.upcard]) : false;
+    round = startRound({
+      playerCards: hand.playerCards, upcard: hand.upcard, rules: state.settings.rules,
+      bet: state.settings.bet, shoe: counting ? state.shoe : null,
+    });
+    if (counting) {
+      state.count.beforeRound = state.count.running;
+      state.count.seenBefore = state.count.seen;
+      syncCount();
+    }
+  } else {
+    round = null;
+  }
   if (round) { round.display = { dealer: [hand.dealerDisplay], hands: [[...hand.playerDisplay]] }; syncDisplay(); }
   answered = null;
   unsure = false;
@@ -2123,9 +2417,11 @@ function answerRule(index, lowConfidence) {
 function advanceRound(action) {
   act(round, action);
   syncDisplay();
+  syncCount();
   if (round.stage === 'done' && !round.banked) {
     round.banked = true;
     recordRound(state.bank, round.result);
+    if (countingOn()) state.count.sinceCheck += 1;
   }
 }
 
@@ -2213,6 +2509,7 @@ function renderTableFelt() {
   }).join('');
 
   $('#felt').innerHTML = `
+    ${freshShoe ? '<p class="shuffle">Fresh shoe \u2014 the count starts over.</p>' : ''}
     <div class="hand-row">
       <div class="hand-label"><span class="eyebrow">Dealer</span><span class="hand-total num">${dealerHead}</span></div>
       <div class="cards">${dealerCards}</div>
@@ -2443,8 +2740,82 @@ function renderAnswered() {
     </div>`;
 }
 
+function answerCountCheck() {
+  if (!countCheck || countCheck.answered) return;
+  const actual = state.count.running;
+  const off = Math.abs(countCheck.guess - actual);
+  countCheck.answered = true;
+  countCheck.actual = actual;
+  countCheck.correct = off === 0;
+  state.count.checks += 1;
+  if (off === 0) state.count.correct += 1;
+  state.count.error += off;
+  state.count.sinceCheck = 0;
+  saveState(state);
+  buzz(off === 0 ? 14 : [26, 50, 26]);
+  renderDrill();
+}
+
+function renderCountFelt() {
+  const c = countCheck;
+  $('#felt').innerHTML = `
+    <div class="rule-prompt">
+      <span class="eyebrow">Count check</span>
+      <p class="rule-text">${c.answered
+        ? `The running count is ${formatCount(c.actual)}.`
+        : 'What is the running count?'}</p>
+      ${c.answered ? '' : `<p class="count-guess num">${formatCount(c.guess)}</p>`}
+    </div>`;
+}
+
+function renderCountCheckPanel() {
+  const c = countCheck;
+  if (!c.answered) {
+    return `<div class="panel" style="display:grid;gap:11px">
+      <div class="stepper">${[-5, -1, 1, 5].map((n) =>
+        `<button class="step" type="button" data-step="${n}">${n > 0 ? '+' : '\u2212'}${Math.abs(n)}</button>`).join('')}</div>
+      <button class="btn btn-primary" id="countCheckBtn" type="button">Check</button>
+      <p class="note">${state.count.seen} cards seen \u00b7 ${countSystem().name} \u00b7 ${state.settings.rules.decks} decks</p>
+    </div>`;
+  }
+  const left = cardsLeft(state.shoe);
+  const tc = trueCount(countSystem(), c.actual, left);
+  return `<div class="panel" style="display:grid;gap:12px">
+      <div class="verdict ${c.correct ? 'good' : 'bad'}">
+        <span class="mark" aria-hidden="true">${c.correct ? '\u2713' : '\u2715'}</span>
+        <div class="verdict-text">
+          <div class="verdict-head">${c.correct ? `Right, ${formatCount(c.actual)}` : `You said ${formatCount(c.guess)}, it is ${formatCount(c.actual)}`}</div>
+          <div class="verdict-sub">True count ${formatTrue(tc)} with ${decksRemaining(left).toFixed(1)} decks left</div>
+        </div>
+      </div>
+      <button class="btn btn-primary" id="nextBtn" type="button">Deal</button>
+      <p class="note">${state.count.seen} cards seen this shoe \u00b7 ${state.count.checks} ${state.count.checks === 1 ? 'check' : 'checks'}, ${state.count.checks ? pct0(state.count.correct / state.count.checks) : '--'} exact</p>
+    </div>`;
+}
+
+function renderCountBar() {
+  const bar = $('#countbar');
+  bar.hidden = !countingOn();
+  if (!countingOn()) return;
+  // Never show the answer while the question is on screen, Show or not.
+  const show = state.settings.counting.show && !(countCheck && !countCheck.answered);
+  const left = state.shoe ? cardsLeft(state.shoe) : state.settings.rules.decks * 52;
+  const tc = trueCount(countSystem(), state.count.running, left);
+  bar.innerHTML = `
+    <span class="count-cell"><span class="cap">Running</span><b class="num">${show ? formatCount(state.count.running) : '\u2022\u2022'}</b></span>
+    <span class="count-cell"><span class="cap">True</span><b class="num">${show ? formatTrue(tc) : '\u2022\u2022'}</b></span>
+    <span class="count-cell"><span class="cap">Decks left</span><b class="num">${decksRemaining(left).toFixed(1)}</b></span>
+    <button class="peek" id="countPeek" type="button" aria-pressed="${show}">${show ? 'Hide' : 'Show'}</button>`;
+}
+
 function renderDrill({ felt = true } = {}) {
   renderStrip();
+  renderCountBar();
+  if (countCheck) {
+    renderCountFelt();
+    $('#answer').innerHTML = renderCountCheckPanel();
+    return;
+  }
   if (quiz) {
     renderRuleFelt();
     if (quiz.chosen === null) renderRulePending(); else renderRuleAnswered();
@@ -2634,6 +3005,18 @@ function renderStats() {
       <p class="note" style="margin-top:10px">High ${money(bank.peak)} · low ${money(bank.low)}. Reset the bankroll in Settings.</p>
     </div>
 
+    ${state.count.checks || state.settings.counting.on ? `<div class="panel">
+      <div class="section-head"><h2 class="section-title">Counting</h2>
+        <span class="section-note">${countSystem().name} \u00b7 ${state.count.shoes} ${state.count.shoes === 1 ? 'shoe' : 'shoes'}</span></div>
+      <div class="tiles">
+        <div class="tile"><span class="cap">Exact</span><span class="val num">${state.count.checks ? pct0(state.count.correct / state.count.checks) : '--'}</span><span class="sub">of ${state.count.checks} ${state.count.checks === 1 ? 'check' : 'checks'}</span></div>
+        <div class="tile"><span class="cap">Average miss</span><span class="val num">${state.count.checks ? (state.count.error / state.count.checks).toFixed(1) : '--'}</span><span class="sub">cards out either way</span></div>
+      </div>
+      <p class="note" style="margin-top:10px">${state.settings.counting.on
+        ? `Running ${formatCount(state.count.running)} with ${state.count.seen} cards seen this shoe.`
+        : 'Counting is off. Turn it on in Settings to keep a shoe going.'}</p>
+    </div>` : ''}
+
     <div class="panel">
       <div class="section-head"><h2 class="section-title">Where the deck stands</h2><span class="section-note">${counts.total} cells</span></div>
       <div class="bars">${stageBars.map((b) => `<div class="bar-row">
@@ -2745,6 +3128,36 @@ function renderSettings() {
     </div>
 
     <div class="panel">
+      <div class="section-head"><h2 class="section-title">Counting</h2>
+        <span class="section-note">${s.counting.on ? countSystem().name : 'off'}</span></div>
+      <div class="field">
+        <div class="field-head"><span class="name">Count the shoe</span>
+          <button class="switch" role="switch" data-opt="counting" aria-checked="${s.counting.on}" aria-label="Count the shoe"></button></div>
+        <p class="field-desc">Keeps one shoe going across hands instead of a fresh one each time, and asks you for the running count now and then. Needs Play the hand out, which it turns on for you.</p>
+      </div>
+      <div class="field">
+        <div class="field-head"><span class="name">System</span></div>
+        <div class="chips">${readySystems().map((sys) => opt(`csystem:${sys.id}`, sys.name, s.counting.system === sys.id)).join('')}</div>
+        <p class="field-desc">${countSystem().blurb}</p>
+      </div>
+      <div class="field">
+        <div class="field-head"><span class="name">Ask me every</span></div>
+        <div class="chips">${[3, 5, 10, 25].map((n) => opt(`cevery:${n}`, `${n} hands`, s.counting.every === n)).join('')}</div>
+      </div>
+      <div class="field">
+        <div class="field-head"><span class="name">Deal out</span></div>
+        <div class="chips">${[0.5, 0.67, 0.75, 0.85].map((n) => opt(`cpen:${n}`, `${Math.round(n * 100)}%`, s.counting.penetration === n)).join('')}</div>
+        <p class="field-desc">How deep the shoe goes before it is shuffled. Deeper is better for a counter and is the first thing a casino takes away.</p>
+      </div>
+      <div class="field">
+        <div class="field-head"><span class="name">Show the count as I go</span>
+          <button class="switch" role="switch" data-opt="cshow" aria-checked="${s.counting.show}" aria-label="Show the count"></button></div>
+        <p class="field-desc">Leave this off to practise. The bar above the table hides the numbers until you tap Show.</p>
+      </div>
+      <p class="field-desc">Next up: converting to a true count on its own, a betting ramp, and the chart cells that move with the count. ${Object.values(COUNT_SYSTEMS).filter((x) => !x.ready).length} further systems are already written down and waiting on those.</p>
+    </div>
+
+    <div class="panel">
       <div class="section-head"><h2 class="section-title">Appearance</h2></div>
       <div class="chips">${['system', 'light', 'dark'].map((t) => opt(`theme:${t}`, t[0].toUpperCase() + t.slice(1), s.theme === t)).join('')}</div>
     </div>
@@ -2846,6 +3259,13 @@ $('#themeBtn').addEventListener('click', () => {
 
 $('#rulesChip').addEventListener('click', () => setView('settings'));
 
+$('#countbar').addEventListener('click', (e) => {
+  if (!e.target.closest('#countPeek')) return;
+  state.settings.counting.show = !state.settings.counting.show;
+  saveState(state);
+  renderCountBar();
+});
+
 $('#modes').addEventListener('click', (e) => {
   const btn = e.target.closest('[data-mode]');
   if (!btn || btn.dataset.mode === state.settings.mode) return;
@@ -2886,6 +3306,13 @@ $('#answer').addEventListener('click', (e) => {
   if (opt) { answerRule(Number(opt.dataset.opt), false); return; }
   if (e.target.closest('#unsureBtn')) { unsure = !unsure; if (quiz) renderRulePending(); else renderPending(); return; }
   if (e.target.closest('#peekBtn')) { peeked = true; renderPending(); return; }
+  const step = e.target.closest('[data-step]');
+  if (step && countCheck && !countCheck.answered) {
+    countCheck.guess += Number(step.dataset.step);
+    renderCountFelt();
+    return;
+  }
+  if (e.target.closest('#countCheckBtn')) { answerCountCheck(); return; }
   if (e.target.closest('#retireBtn')) { retireCurrent(); return; }
   if (e.target.closest('#nextBtn')) { deal(forcedId); forcedId = null; }
 });
@@ -2946,13 +3373,27 @@ $('#settingsHost').addEventListener('click', (e) => {
     else if (kind === 'theme') { state.settings.theme = value; applyTheme(); }
     else if (kind === 'oddsUpFront') state.settings.oddsUpFront = !state.settings.oddsUpFront;
     else if (kind === 'haptics') state.settings.haptics = !state.settings.haptics;
-    else if (kind === 'table') { state.settings.table = !state.settings.table; deal(); }
+    else if (kind === 'table') {
+      state.settings.table = !state.settings.table;
+      if (!state.settings.table) state.settings.counting.on = false;
+      deal();
+    }
     else if (kind === 'bet') {
       state.settings.bet = Number(value);
       // A hand that has not been acted on yet takes the new stake.
       if (round && !answered) { round.bet = state.settings.bet; round.hands[0].bet = state.settings.bet; }
     }
     else if (kind === 'bankstart') { state.bank = freshBank(Number(value)); }
+    else if (kind === 'counting') {
+      state.settings.counting.on = !state.settings.counting.on;
+      if (state.settings.counting.on) state.settings.table = true;
+      state.count = freshCount();
+      state.shoe = null;
+      deal();
+    } else if (kind === 'csystem') { state.settings.counting.system = value; state.count = freshCount(); state.shoe = null; deal(); }
+    else if (kind === 'cevery') state.settings.counting.every = Number(value);
+    else if (kind === 'cpen') state.settings.counting.penetration = Number(value);
+    else if (kind === 'cshow') state.settings.counting.show = !state.settings.counting.show;
     state.settings.rules = normalizeRules(state.settings.rules);
     rulesChanged();
     renderSettings();
@@ -3021,6 +3462,16 @@ document.addEventListener('keydown', (e) => {
     if (k === 'u') { unsure = !unsure; renderRulePending(); return; }
     const n = Number(k);
     if (n >= 1 && n <= quiz.options.length) { e.preventDefault(); answerRule(n - 1, e.shiftKey); }
+    return;
+  }
+  if (countCheck) {
+    if (countCheck.answered) {
+      if (k === 'enter' || k === ' ' || k === 'n') { e.preventDefault(); deal(); }
+      return;
+    }
+    if (e.key === 'ArrowUp' || e.key === '+' || e.key === '=') { e.preventDefault(); countCheck.guess += 1; renderCountFelt(); return; }
+    if (e.key === 'ArrowDown' || e.key === '-') { e.preventDefault(); countCheck.guess -= 1; renderCountFelt(); return; }
+    if (k === 'enter' || k === ' ') { e.preventDefault(); answerCountCheck(); }
     return;
   }
   const keyToAction = { h: 'hit', s: 'stand', d: 'double', p: 'split', r: 'surrender' };

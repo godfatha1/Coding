@@ -45,6 +45,17 @@ a blackjack, and the drill never deals you one either. The app's odds are all
 quoted after the dealer peeks, so leaving naturals out of both sides keeps the
 money consistent with every number on screen.
 
+**Counts the shoe.** Turn on *Count the shoe* and one shoe runs across hands
+instead of a fresh one each time, dealt out to the penetration you set. Every
+card you can see moves the running count; the dealer's hole card joins it only
+when it turns over. The bar above the table keeps the running count, the true
+count and the decks remaining hidden until you tap Show, and every few hands the
+app stops and asks you for the running count before it deals. Hi-Lo is the
+system that ships.
+
+The shoe survives a reload, so refreshing the page does not wipe a count you
+have lost track of.
+
 **Remembers what you find hard.** Each cell is a spaced-repetition card:
 
 | What you did | What happens |
@@ -63,6 +74,26 @@ after a miss get a dashed outline.
 **Follows your table.** 4, 6 or 8 decks, dealer stands or hits soft 17, double
 after split on or off, late surrender on or off. The chart, the buttons and the
 odds all move together.
+
+## Where counting goes next
+
+Hi-Lo running count is step one. The engine takes a count system as a table of
+tags, so each of these is mostly training UI rather than new maths:
+
+1. **Running count** — built.
+2. **True count on its own** — asked separately, so the division gets drilled
+   rather than handed to you.
+3. **A betting ramp** — how much to put out at each true count, graded like the
+   chart is.
+4. **Deviations** — the Illustrious 18 and Fab 4: the chart cells that move once
+   the count is high or low enough. These need the odds engine to re-solve
+   against the live shoe rather than a full one, which it is already shaped for.
+5. **Level-two systems** — Omega II and Zen, with two-point tags.
+6. **Side counts** — aces tracked apart from the main count.
+
+`src/engine/counting.js` already carries the real tag values for Knock-Out,
+Hi-Opt I, Omega II and the Zen Count, each marked not ready and each verified by
+the test suite to balance the way it claims to.
 
 ## Running it
 
@@ -106,7 +137,7 @@ anywhere and open it; everything works except the service worker.
 npm test
 ```
 
-192 checks across six files:
+259 checks across seven files:
 
 - **`test/odds.test.mjs`** — distributions sum to one; dealer bust rates match
   published tables for all ten upcards; the infinite-deck dealer tables for 6 and
@@ -120,11 +151,17 @@ npm test
   chart row lands in exactly one rule group, no two groups share a rule, and
   every row in a group really carries that group's rule.
 - **`test/game.test.mjs`** — the shoe is a real shoe with the visible cards out;
+  every rank comes off it at its true share whatever the upcard;
   the dealer is never dealt a blackjack in 8000 tries; doubling, splitting and
   surrender settle at the right stake; split aces take one card; the dealer
   stands pat when every player hand is dead. Then the end-to-end check: six
   hands played out 120,000 times each return what the odds engine independently
   says they should, within 0.014.
+- **`test/counting.test.mjs`** — every tag table balances the way it claims,
+  Hi-Lo on known hands, true-count arithmetic, the shoe's pulls and penetration,
+  the hole card staying out of the count until it turns. Then the invariant that
+  catches nearly everything: deal a whole shoe out and what you have seen and
+  what is left cancel to exactly zero.
 - **`test/srs.test.mjs`** — retirement, low-confidence rotation, miss handling,
   and a 4000-hand simulation of a learner who is shaky on hard 15 and 16: the
   shaky cells come back 50× more often than settled ones, none of them retires,
@@ -141,7 +178,9 @@ index.html              app shell and markup
 src/styles.css          tokens and components, light and dark
 src/engine/
   rules.js              table rules and presets
-  game.js               the shoe and the round played out for money
+  shoe.js               one shoe, dealt across hands
+  game.js               the round played out for money
+  counting.js           count systems and the running / true count
   cards.js              hand totals, soft/hard, display cards
   odds.js               the solver
   strategy.js           the S17 and H17 charts

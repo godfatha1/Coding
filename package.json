@@ -12,7 +12,9 @@
     "test:strategy": "node test/strategy.test.mjs",
     "test:srs": "node test/srs.test.mjs",
     "test:rules": "node test/rules-deck.test.mjs",
+    "test:counting": "node test/counting.test.mjs",
+    "test:game": "node test/game.test.mjs",
     "test:ui": "node tools/bundle.mjs >/dev/null && node test/ui.test.mjs",
-    "test": "node test/odds.test.mjs && node test/strategy.test.mjs && node test/srs.test.mjs && node test/rules-deck.test.mjs && node tools/bundle.mjs >/dev/null && node test/ui.test.mjs"
+    "test": "node test/odds.test.mjs && node test/strategy.test.mjs && node test/srs.test.mjs && node test/rules-deck.test.mjs && node test/counting.test.mjs && node test/game.test.mjs && node tools/bundle.mjs >/dev/null && node test/ui.test.mjs"
   }
 }

@@ -4,8 +4,10 @@ import { analyzeHand } from '../engine/odds.js';
 import { lookupStrategy, chartFor, UPCARDS, codeToAction, rowLabel, rowRule } from '../engine/strategy.js';
 import { dealScenario, parseScenario, scenarioLabel, ruleGroups, HARD_TOTALS, SOFT_TOTALS, PAIR_RANKS } from '../engine/scenarios.js';
 import { gradeCard, pickNext, retireCard, reviveCard, cardCounts, dueCount, isShaky } from '../engine/srs.js';
-import { startRound, act, legalMoves, handDone } from '../engine/game.js';
-import { loadState, saveState, deckFor, ruleDeckFor, ensureCard, ensureRuleCard, clearProgress, exportJSON, importJSON, freshBank, recordRound } from './store.js';
+import { startRound, act, legalMoves, handDone, exposedCards } from '../engine/game.js';
+import { newShoe, cardsLeft, needsShuffle, canDeal } from '../engine/shoe.js';
+import { COUNT_SYSTEMS, getSystem, readySystems, countValue, startingCount, trueCount, decksRemaining, formatCount, formatTrue } from '../engine/counting.js';
+import { loadState, saveState, deckFor, ruleDeckFor, ensureCard, ensureRuleCard, clearProgress, exportJSON, importJSON, freshBank, freshCount, recordRound } from './store.js';
 import { pct1, pct0, signed, ACTION_KEY, ACTION_NAME, ACTION_IMPERATIVE, ACTION_GERUND, rowBar, rowNums, outcomeBlock, cardFace, cardBack } from './format.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -22,6 +24,8 @@ let view = 'drill';
 let chartSelection = null;
 let quiz = null;          // the reverse question: a rule, four groups, one right
 let round = null;         // the hand being played out for money, in table mode
+let countCheck = null;    // the running-count question between hands
+let freshShoe = false;    // a shuffle happened before this hand
 
 const MODES = [
   { id: 'play', label: 'Name the play' },
@@ -52,6 +56,35 @@ const moneySigned = (n) => `${n > 0 ? '+' : n < 0 ? '\u2212' : ''}$${Math.abs(Ma
 
 // Drawn cards keep the suit they were first shown with, so a redraw of the
 // screen does not reshuffle the table.
+const countingOn = () => state.settings.table && state.settings.counting.on;
+const countSystem = () => getSystem(state.settings.counting.system);
+
+// Reshuffle when the shoe is past its penetration, when the deck count changes,
+// or when it cannot supply the hand the drill wants. Returns true on a shuffle.
+function ensureShoe(need) {
+  const { decks } = state.settings.rules;
+  const c = state.settings.counting;
+  const stale = !state.shoe || state.shoe.decks !== decks
+    || needsShuffle(state.shoe, c.penetration) || !canDeal(state.shoe, need);
+  if (!stale) return false;
+  state.shoe = newShoe(decks);
+  const base = startingCount(countSystem(), decks);
+  Object.assign(state.count, { running: base, beforeRound: base, seen: 0, seenBefore: 0, shoes: state.count.shoes + 1 });
+  return true;
+}
+
+// The running count is rebuilt from the round each time rather than nudged, so
+// turning the hole card or splitting a hand cannot double-count anything.
+function syncCount() {
+  if (!countingOn() || !round) return;
+  const system = countSystem();
+  const seen = exposedCards(round);
+  let tally = 0;
+  for (const card of seen) tally += countValue(system, card);
+  state.count.running = state.count.beforeRound + tally;
+  state.count.seen = state.count.seenBefore + seen.length;
+}
+
 function syncDisplay() {
   if (!round) return;
   round.display = round.display || { dealer: [], hands: [] };
@@ -122,6 +155,16 @@ function dealRule() {
 }
 
 function deal(id) {
+  // Ask for the count before dealing, while the shoe still holds what you saw.
+  if (!id && countingOn() && state.count.seen > 0 && state.count.sinceCheck >= state.settings.counting.every) {
+    countCheck = { guess: 0, answered: false };
+    hand = null;
+    quiz = null;
+    round = null;
+    renderDrill();
+    return;
+  }
+  countCheck = null;
   if (!id && wantsRuleQuestion()) { dealRule(); return; }
   quiz = null;
   const deck = filteredDeck();
@@ -133,9 +176,21 @@ function deal(id) {
   hand = dealScenario(pick.id);
   analysis = analyzeHand(hand.playerCards, hand.upcard, state.settings.rules);
   book = lookupStrategy(hand.playerCards, hand.upcard, state.settings.rules);
-  round = state.settings.table
-    ? startRound({ playerCards: hand.playerCards, upcard: hand.upcard, rules: state.settings.rules, bet: state.settings.bet })
-    : null;
+  if (state.settings.table) {
+    const counting = countingOn();
+    freshShoe = counting ? ensureShoe([...hand.playerCards, hand.upcard]) : false;
+    round = startRound({
+      playerCards: hand.playerCards, upcard: hand.upcard, rules: state.settings.rules,
+      bet: state.settings.bet, shoe: counting ? state.shoe : null,
+    });
+    if (counting) {
+      state.count.beforeRound = state.count.running;
+      state.count.seenBefore = state.count.seen;
+      syncCount();
+    }
+  } else {
+    round = null;
+  }
   if (round) { round.display = { dealer: [hand.dealerDisplay], hands: [[...hand.playerDisplay]] }; syncDisplay(); }
   answered = null;
   unsure = false;
@@ -207,9 +262,11 @@ function answerRule(index, lowConfidence) {
 function advanceRound(action) {
   act(round, action);
   syncDisplay();
+  syncCount();
   if (round.stage === 'done' && !round.banked) {
     round.banked = true;
     recordRound(state.bank, round.result);
+    if (countingOn()) state.count.sinceCheck += 1;
   }
 }
 
@@ -297,6 +354,7 @@ function renderTableFelt() {
   }).join('');
 
   $('#felt').innerHTML = `
+    ${freshShoe ? '<p class="shuffle">Fresh shoe \u2014 the count starts over.</p>' : ''}
     <div class="hand-row">
       <div class="hand-label"><span class="eyebrow">Dealer</span><span class="hand-total num">${dealerHead}</span></div>
       <div class="cards">${dealerCards}</div>
@@ -527,8 +585,82 @@ function renderAnswered() {
     </div>`;
 }
 
+function answerCountCheck() {
+  if (!countCheck || countCheck.answered) return;
+  const actual = state.count.running;
+  const off = Math.abs(countCheck.guess - actual);
+  countCheck.answered = true;
+  countCheck.actual = actual;
+  countCheck.correct = off === 0;
+  state.count.checks += 1;
+  if (off === 0) state.count.correct += 1;
+  state.count.error += off;
+  state.count.sinceCheck = 0;
+  saveState(state);
+  buzz(off === 0 ? 14 : [26, 50, 26]);
+  renderDrill();
+}
+
+function renderCountFelt() {
+  const c = countCheck;
+  $('#felt').innerHTML = `
+    <div class="rule-prompt">
+      <span class="eyebrow">Count check</span>
+      <p class="rule-text">${c.answered
+        ? `The running count is ${formatCount(c.actual)}.`
+        : 'What is the running count?'}</p>
+      ${c.answered ? '' : `<p class="count-guess num">${formatCount(c.guess)}</p>`}
+    </div>`;
+}
+
+function renderCountCheckPanel() {
+  const c = countCheck;
+  if (!c.answered) {
+    return `<div class="panel" style="display:grid;gap:11px">
+      <div class="stepper">${[-5, -1, 1, 5].map((n) =>
+        `<button class="step" type="button" data-step="${n}">${n > 0 ? '+' : '\u2212'}${Math.abs(n)}</button>`).join('')}</div>
+      <button class="btn btn-primary" id="countCheckBtn" type="button">Check</button>
+      <p class="note">${state.count.seen} cards seen \u00b7 ${countSystem().name} \u00b7 ${state.settings.rules.decks} decks</p>
+    </div>`;
+  }
+  const left = cardsLeft(state.shoe);
+  const tc = trueCount(countSystem(), c.actual, left);
+  return `<div class="panel" style="display:grid;gap:12px">
+      <div class="verdict ${c.correct ? 'good' : 'bad'}">
+        <span class="mark" aria-hidden="true">${c.correct ? '\u2713' : '\u2715'}</span>
+        <div class="verdict-text">
+          <div class="verdict-head">${c.correct ? `Right, ${formatCount(c.actual)}` : `You said ${formatCount(c.guess)}, it is ${formatCount(c.actual)}`}</div>
+          <div class="verdict-sub">True count ${formatTrue(tc)} with ${decksRemaining(left).toFixed(1)} decks left</div>
+        </div>
+      </div>
+      <button class="btn btn-primary" id="nextBtn" type="button">Deal</button>
+      <p class="note">${state.count.seen} cards seen this shoe \u00b7 ${state.count.checks} ${state.count.checks === 1 ? 'check' : 'checks'}, ${state.count.checks ? pct0(state.count.correct / state.count.checks) : '--'} exact</p>
+    </div>`;
+}
+
+function renderCountBar() {
+  const bar = $('#countbar');
+  bar.hidden = !countingOn();
+  if (!countingOn()) return;
+  // Never show the answer while the question is on screen, Show or not.
+  const show = state.settings.counting.show && !(countCheck && !countCheck.answered);
+  const left = state.shoe ? cardsLeft(state.shoe) : state.settings.rules.decks * 52;
+  const tc = trueCount(countSystem(), state.count.running, left);
+  bar.innerHTML = `
+    <span class="count-cell"><span class="cap">Running</span><b class="num">${show ? formatCount(state.count.running) : '\u2022\u2022'}</b></span>
+    <span class="count-cell"><span class="cap">True</span><b class="num">${show ? formatTrue(tc) : '\u2022\u2022'}</b></span>
+    <span class="count-cell"><span class="cap">Decks left</span><b class="num">${decksRemaining(left).toFixed(1)}</b></span>
+    <button class="peek" id="countPeek" type="button" aria-pressed="${show}">${show ? 'Hide' : 'Show'}</button>`;
+}
+
 function renderDrill({ felt = true } = {}) {
   renderStrip();
+  renderCountBar();
+  if (countCheck) {
+    renderCountFelt();
+    $('#answer').innerHTML = renderCountCheckPanel();
+    return;
+  }
   if (quiz) {
     renderRuleFelt();
     if (quiz.chosen === null) renderRulePending(); else renderRuleAnswered();
@@ -718,6 +850,18 @@ function renderStats() {
       <p class="note" style="margin-top:10px">High ${money(bank.peak)} · low ${money(bank.low)}. Reset the bankroll in Settings.</p>
     </div>
 
+    ${state.count.checks || state.settings.counting.on ? `<div class="panel">
+      <div class="section-head"><h2 class="section-title">Counting</h2>
+        <span class="section-note">${countSystem().name} \u00b7 ${state.count.shoes} ${state.count.shoes === 1 ? 'shoe' : 'shoes'}</span></div>
+      <div class="tiles">
+        <div class="tile"><span class="cap">Exact</span><span class="val num">${state.count.checks ? pct0(state.count.correct / state.count.checks) : '--'}</span><span class="sub">of ${state.count.checks} ${state.count.checks === 1 ? 'check' : 'checks'}</span></div>
+        <div class="tile"><span class="cap">Average miss</span><span class="val num">${state.count.checks ? (state.count.error / state.count.checks).toFixed(1) : '--'}</span><span class="sub">cards out either way</span></div>
+      </div>
+      <p class="note" style="margin-top:10px">${state.settings.counting.on
+        ? `Running ${formatCount(state.count.running)} with ${state.count.seen} cards seen this shoe.`
+        : 'Counting is off. Turn it on in Settings to keep a shoe going.'}</p>
+    </div>` : ''}
+
     <div class="panel">
       <div class="section-head"><h2 class="section-title">Where the deck stands</h2><span class="section-note">${counts.total} cells</span></div>
       <div class="bars">${stageBars.map((b) => `<div class="bar-row">
@@ -829,6 +973,36 @@ function renderSettings() {
     </div>
 
     <div class="panel">
+      <div class="section-head"><h2 class="section-title">Counting</h2>
+        <span class="section-note">${s.counting.on ? countSystem().name : 'off'}</span></div>
+      <div class="field">
+        <div class="field-head"><span class="name">Count the shoe</span>
+          <button class="switch" role="switch" data-opt="counting" aria-checked="${s.counting.on}" aria-label="Count the shoe"></button></div>
+        <p class="field-desc">Keeps one shoe going across hands instead of a fresh one each time, and asks you for the running count now and then. Needs Play the hand out, which it turns on for you.</p>
+      </div>
+      <div class="field">
+        <div class="field-head"><span class="name">System</span></div>
+        <div class="chips">${readySystems().map((sys) => opt(`csystem:${sys.id}`, sys.name, s.counting.system === sys.id)).join('')}</div>
+        <p class="field-desc">${countSystem().blurb}</p>
+      </div>
+      <div class="field">
+        <div class="field-head"><span class="name">Ask me every</span></div>
+        <div class="chips">${[3, 5, 10, 25].map((n) => opt(`cevery:${n}`, `${n} hands`, s.counting.every === n)).join('')}</div>
+      </div>
+      <div class="field">
+        <div class="field-head"><span class="name">Deal out</span></div>
+        <div class="chips">${[0.5, 0.67, 0.75, 0.85].map((n) => opt(`cpen:${n}`, `${Math.round(n * 100)}%`, s.counting.penetration === n)).join('')}</div>
+        <p class="field-desc">How deep the shoe goes before it is shuffled. Deeper is better for a counter and is the first thing a casino takes away.</p>
+      </div>
+      <div class="field">
+        <div class="field-head"><span class="name">Show the count as I go</span>
+          <button class="switch" role="switch" data-opt="cshow" aria-checked="${s.counting.show}" aria-label="Show the count"></button></div>
+        <p class="field-desc">Leave this off to practise. The bar above the table hides the numbers until you tap Show.</p>
+      </div>
+      <p class="field-desc">Next up: converting to a true count on its own, a betting ramp, and the chart cells that move with the count. ${Object.values(COUNT_SYSTEMS).filter((x) => !x.ready).length} further systems are already written down and waiting on those.</p>
+    </div>
+
+    <div class="panel">
       <div class="section-head"><h2 class="section-title">Appearance</h2></div>
       <div class="chips">${['system', 'light', 'dark'].map((t) => opt(`theme:${t}`, t[0].toUpperCase() + t.slice(1), s.theme === t)).join('')}</div>
     </div>
@@ -930,6 +1104,13 @@ $('#themeBtn').addEventListener('click', () => {
 
 $('#rulesChip').addEventListener('click', () => setView('settings'));
 
+$('#countbar').addEventListener('click', (e) => {
+  if (!e.target.closest('#countPeek')) return;
+  state.settings.counting.show = !state.settings.counting.show;
+  saveState(state);
+  renderCountBar();
+});
+
 $('#modes').addEventListener('click', (e) => {
   const btn = e.target.closest('[data-mode]');
   if (!btn || btn.dataset.mode === state.settings.mode) return;
@@ -970,6 +1151,13 @@ $('#answer').addEventListener('click', (e) => {
   if (opt) { answerRule(Number(opt.dataset.opt), false); return; }
   if (e.target.closest('#unsureBtn')) { unsure = !unsure; if (quiz) renderRulePending(); else renderPending(); return; }
   if (e.target.closest('#peekBtn')) { peeked = true; renderPending(); return; }
+  const step = e.target.closest('[data-step]');
+  if (step && countCheck && !countCheck.answered) {
+    countCheck.guess += Number(step.dataset.step);
+    renderCountFelt();
+    return;
+  }
+  if (e.target.closest('#countCheckBtn')) { answerCountCheck(); return; }
   if (e.target.closest('#retireBtn')) { retireCurrent(); return; }
   if (e.target.closest('#nextBtn')) { deal(forcedId); forcedId = null; }
 });
@@ -1030,13 +1218,27 @@ $('#settingsHost').addEventListener('click', (e) => {
     else if (kind === 'theme') { state.settings.theme = value; applyTheme(); }
     else if (kind === 'oddsUpFront') state.settings.oddsUpFront = !state.settings.oddsUpFront;
     else if (kind === 'haptics') state.settings.haptics = !state.settings.haptics;
-    else if (kind === 'table') { state.settings.table = !state.settings.table; deal(); }
+    else if (kind === 'table') {
+      state.settings.table = !state.settings.table;
+      if (!state.settings.table) state.settings.counting.on = false;
+      deal();
+    }
     else if (kind === 'bet') {
       state.settings.bet = Number(value);
       // A hand that has not been acted on yet takes the new stake.
       if (round && !answered) { round.bet = state.settings.bet; round.hands[0].bet = state.settings.bet; }
     }
     else if (kind === 'bankstart') { state.bank = freshBank(Number(value)); }
+    else if (kind === 'counting') {
+      state.settings.counting.on = !state.settings.counting.on;
+      if (state.settings.counting.on) state.settings.table = true;
+      state.count = freshCount();
+      state.shoe = null;
+      deal();
+    } else if (kind === 'csystem') { state.settings.counting.system = value; state.count = freshCount(); state.shoe = null; deal(); }
+    else if (kind === 'cevery') state.settings.counting.every = Number(value);
+    else if (kind === 'cpen') state.settings.counting.penetration = Number(value);
+    else if (kind === 'cshow') state.settings.counting.show = !state.settings.counting.show;
     state.settings.rules = normalizeRules(state.settings.rules);
     rulesChanged();
     renderSettings();
@@ -1105,6 +1307,16 @@ document.addEventListener('keydown', (e) => {
     if (k === 'u') { unsure = !unsure; renderRulePending(); return; }
     const n = Number(k);
     if (n >= 1 && n <= quiz.options.length) { e.preventDefault(); answerRule(n - 1, e.shiftKey); }
+    return;
+  }
+  if (countCheck) {
+    if (countCheck.answered) {
+      if (k === 'enter' || k === ' ' || k === 'n') { e.preventDefault(); deal(); }
+      return;
+    }
+    if (e.key === 'ArrowUp' || e.key === '+' || e.key === '=') { e.preventDefault(); countCheck.guess += 1; renderCountFelt(); return; }
+    if (e.key === 'ArrowDown' || e.key === '-') { e.preventDefault(); countCheck.guess -= 1; renderCountFelt(); return; }
+    if (k === 'enter' || k === ' ') { e.preventDefault(); answerCountCheck(); }
     return;
   }
   const keyToAction = { h: 'hit', s: 'stand', d: 'double', p: 'split', r: 'surrender' };

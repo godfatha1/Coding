@@ -11,11 +11,16 @@ export const DEFAULT_SETTINGS = {
   mode: 'play',          // 'play' = name the action, 'hands' = name the hands, 'mix' = both
   table: false,          // play the hand out for money after the graded call
   bet: 25,
+  counting: { on: false, system: 'hilo', show: false, every: 5, penetration: 0.75 },
   theme: 'system',
   haptics: true,
   oddsUpFront: false,
   chartProgress: true,
 };
+
+export function freshCount() {
+  return { running: 0, seen: 0, beforeRound: 0, seenBefore: 0, sinceCheck: 0, checks: 0, correct: 0, error: 0, shoes: 0 };
+}
 
 export function freshBank(start) {
   return { start, balance: start, hands: 0, wagered: 0, won: 0, lost: 0, pushed: 0, peak: start, low: start, history: [start] };
@@ -48,6 +53,8 @@ function freshState() {
     ruleCards: {},
     lifetime: { answered: 0, correct: 0, shaky: 0, bestStreak: 0 },
     bank: freshBank(1000),
+    count: freshCount(),
+    shoe: null,
     session: { answered: 0, correct: 0, streak: 0, recent: [] },
   };
 }
@@ -63,9 +70,16 @@ export function loadState() {
   const state = {
     ...base,
     ...saved,
-    settings: { ...base.settings, ...(saved.settings || {}), rules: normalizeRules(saved.settings?.rules) },
+    settings: {
+      ...base.settings,
+      ...(saved.settings || {}),
+      rules: normalizeRules(saved.settings?.rules),
+      counting: { ...base.settings.counting, ...(saved.settings?.counting || {}) },
+    },
     lifetime: { ...base.lifetime, ...(saved.lifetime || {}) },
     bank: saneBank(saved.bank, base.bank),
+    count: { ...base.count, ...(saved.count || {}) },
+    shoe: saneShoe(saved.shoe),
     session: { ...base.session },
     cards: {},
     ruleCards: {},
@@ -92,6 +106,7 @@ export function saveState(state) {
     localStorage.setItem(KEY, JSON.stringify({
       version: 1, settings: state.settings, step: state.step, sinceNew: state.sinceNew,
       cards, ruleCards: state.ruleCards, lifetime: state.lifetime, bank: state.bank,
+      count: state.count, shoe: state.shoe,
     }));
     return true;
   } catch { return false; }
@@ -124,6 +139,14 @@ function saneBank(saved, fallback) {
   return bank;
 }
 
+// The shoe is kept across reloads so the count cannot be wiped by refreshing.
+function saneShoe(saved) {
+  if (!saved || !Array.isArray(saved.cards) || !saved.cards.length) return null;
+  const cards = saved.cards.filter((c) => Number.isInteger(c) && c >= 1 && c <= 10);
+  if (!cards.length) return null;
+  return { cards, decks: Number(saved.decks) || 6, initial: Number(saved.initial) || cards.length };
+}
+
 export function clearProgress(state) {
   state.cards = {};
   state.ruleCards = {};
@@ -131,6 +154,8 @@ export function clearProgress(state) {
   state.sinceNew = 0;
   state.lifetime = { answered: 0, correct: 0, shaky: 0, bestStreak: 0 };
   state.bank = freshBank(state.bank?.start ?? 1000);
+  state.count = freshCount();
+  state.shoe = null;
   state.session = { answered: 0, correct: 0, streak: 0, recent: [] };
   saveState(state);
 }
@@ -140,6 +165,7 @@ export function exportJSON(state) {
     version: 1, exported: new Date().toISOString(),
     settings: state.settings, step: state.step, sinceNew: state.sinceNew,
     cards: state.cards, ruleCards: state.ruleCards, lifetime: state.lifetime, bank: state.bank,
+    count: state.count,
   }, null, 1);
 }
 
@@ -149,11 +175,18 @@ export function importJSON(text) {
   const base = freshState();
   const state = {
     ...base,
-    settings: { ...base.settings, ...(parsed.settings || {}), rules: normalizeRules(parsed.settings?.rules) },
+    settings: {
+      ...base.settings,
+      ...(parsed.settings || {}),
+      rules: normalizeRules(parsed.settings?.rules),
+      counting: { ...base.settings.counting, ...(parsed.settings?.counting || {}) },
+    },
     step: Number(parsed.step) || 0,
     sinceNew: Number(parsed.sinceNew) || 0,
     lifetime: { ...base.lifetime, ...(parsed.lifetime || {}) },
     bank: saneBank(parsed.bank, base.bank),
+    count: { ...base.count, ...(parsed.count || {}) },
+    shoe: null,
     cards: {},
     ruleCards: {},
   };

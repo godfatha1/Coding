@@ -1,5 +1,6 @@
 // The money game, checked against the odds engine that is already verified.
-import { createShoe, startRound, act, legalMoves, handDone } from '../src/engine/game.js';
+import { startRound, act, legalMoves, handDone } from '../src/engine/game.js';
+import { newShoe, pullRank, cardsLeft } from '../src/engine/shoe.js';
 import { normalizeRules } from '../src/engine/rules.js';
 import { analyzeHand } from '../src/engine/odds.js';
 import { handTotal } from '../src/engine/cards.js';
@@ -14,14 +15,15 @@ const RULES = normalizeRules({ decks: 8, hitSoft17: false, das: true, surrender:
 
 // 1. The shoe is a real shoe with the visible cards taken out.
 {
-  const shoe = createShoe(8, [10, 6, 9]);
-  say(shoe.length === 8 * 52 - 3, `an 8-deck shoe less three cards holds ${shoe.length} cards`);
+  const shoe = newShoe(8);
+  for (const c of [10, 6, 9]) pullRank(shoe, c);
+  say(cardsLeft(shoe) === 8 * 52 - 3, `an 8-deck shoe less three cards holds ${cardsLeft(shoe)} cards`);
   const counts = new Array(11).fill(0);
-  for (const c of shoe) counts[c] += 1;
+  for (const c of shoe.cards) counts[c] += 1;
   say(counts[10] === 8 * 16 - 1, 'one ten is gone');
   say(counts[6] === 8 * 4 - 1 && counts[9] === 8 * 4 - 1, 'one six and one nine are gone');
   say(counts[2] === 8 * 4, 'untouched ranks are whole');
-  const sorted = [...shoe].every((c, i, a) => i === 0 || a[i - 1] <= c);
+  const sorted = [...shoe.cards].every((c, i, a) => i === 0 || a[i - 1] <= c);
   say(!sorted, 'the shoe is shuffled');
 }
 
@@ -89,6 +91,33 @@ const RULES = normalizeRules({ decks: 8, hitSoft17: false, das: true, surrender:
     }
   }
   say(checked > 0, `the dealer stops at two cards when the player busts (${checked} rounds)`);
+}
+
+// 5b. The next card off the shoe is a fair draw, whatever the upcard.
+// Pulling the drill's cards or the hole card by scanning from the top skews
+// this badly, and the EV checks below only barely notice.
+{
+  const trials = 120000;
+  for (const up of [10, 1, 6]) {
+    const seen = new Array(11).fill(0);
+    for (let i = 0; i < trials; i += 1) {
+      const g = startRound({ playerCards: [9, 7], upcard: up, rules: RULES, bet: 1 });
+      act(g, 'hit');
+      seen[g.hands[0].cards[2]] += 1;
+    }
+    // Three cards are already out; the hole card is one more of unknown rank.
+    const pool = 8 * 52 - 4;
+    const worst = [];
+    for (let v = 1; v <= 10; v += 1) {
+      const count = (v === 10 ? 16 : 4) * 8 - (v === 9 || v === 7 ? 1 : 0) - (v === up ? 1 : 0);
+      const expected = count / pool;
+      const actual = seen[v] / trials;
+      worst.push({ v, off: Math.abs(actual - expected) * 100, actual: actual * 100, expected: expected * 100 });
+    }
+    worst.sort((a, b) => b.off - a.off);
+    const w = worst[0];
+    say(w.off < 0.45, `against ${up === 1 ? 'an ace' : `a ${up}`} every rank is drawn at its true share (worst: ${w.v} at ${w.actual.toFixed(2)}% vs ${w.expected.toFixed(2)}%)`);
+  }
 }
 
 // 6. Played out many times, a hand returns what the odds engine says it should.

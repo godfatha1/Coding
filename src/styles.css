@@ -601,3 +601,28 @@ details.compare[open] > summary::after { transform: rotate(180deg); }
 .bank-chart .ax { font: 600 9px var(--font-ui); fill: var(--muted); font-variant-numeric: tabular-nums; }
 .bank-chart .ax.dim { fill: var(--line-strong); }
 .bank-chart .ax.end { font-weight: 800; fill: var(--fg); }
+
+/* ---------- counting ---------- */
+.countbar {
+  display: flex; align-items: center; gap: 14px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 9px 12px;
+}
+.count-cell { display: grid; gap: 1px; }
+.count-cell .cap { font-size: 9.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.count-cell b { font: 700 16px/1 var(--font-display); font-variant-numeric: tabular-nums; }
+.peek {
+  margin-left: auto; appearance: none; border: 1px solid var(--line-strong); background: var(--surface-3);
+  color: var(--fg-2); border-radius: 8px; padding: 6px 11px; font-size: 12px; font-weight: 650; cursor: pointer;
+}
+.count-guess { margin: 2px 0 0; font: 800 44px/1 var(--font-display); letter-spacing: -.03em; }
+.stepper { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.step {
+  appearance: none; min-height: 52px; border: 1px solid var(--line-strong); background: var(--surface);
+  border-radius: 11px; font: 700 16px/1 var(--font-ui); font-variant-numeric: tabular-nums; cursor: pointer;
+  touch-action: manipulation;
+}
+.step:active { background: var(--surface-2); }
+.shuffle {
+  margin: 0 0 2px; font-size: 12px; font-weight: 650; color: var(--accent);
+  background: var(--accent-soft); border-radius: 8px; padding: 6px 9px;
+}

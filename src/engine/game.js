@@ -1,5 +1,6 @@
 import { handTotal, addCard } from './cards.js';
 import { doubleAllowedOn } from './rules.js';
+import { newShoe, drawFrom, pullRank, pullExcluding } from './shoe.js';
 
 // Playing the hand out for money.
 //
@@ -13,41 +14,32 @@ import { doubleAllowedOn } from './rules.js';
 // leaving blackjack out of both sides keeps the money consistent with every
 // number on screen instead of quietly running worse than them.
 
-export function createShoe(decks, exclude = [], rng = Math.random) {
-  const cards = [];
-  for (let d = 0; d < decks; d += 1) {
-    for (let v = 1; v <= 10; v += 1) {
-      for (let n = v === 10 ? 16 : 4; n > 0; n -= 1) cards.push(v);
-    }
-  }
-  for (const c of exclude) {
-    const i = cards.indexOf(c);
-    if (i >= 0) cards.splice(i, 1);
-  }
-  for (let i = cards.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(rng() * (i + 1));
-    [cards[i], cards[j]] = [cards[j], cards[i]];
-  }
-  return cards;
-}
-
 const newHand = (cards, bet, fromSplit = false) => ({
   cards: [...cards], bet, doubled: false, stood: false, bust: false, surrendered: false, fromSplit,
 });
 
 export const handDone = (h) => h.stood || h.bust || h.surrendered;
 
-export function startRound({ playerCards, upcard, rules, bet = 1, rng = Math.random }) {
-  const shoe = createShoe(rules.decks, [...playerCards, upcard], rng);
+// With no shoe passed in, the round gets a private one. Counting hands over a
+// persistent shoe instead, so the cards that leave it stay gone.
+export function startRound({ playerCards, upcard, rules, bet = 1, rng = Math.random, shoe = null }) {
+  const live = shoe || newShoe(rules.decks, rng);
+  const taken = [];
+  for (const c of [...playerCards, upcard]) { if (pullRank(live, c)) taken.push(c); }
+
+  // Post-peek: the hole card is never the one that would make blackjack.
   const natural = upcard === 1 ? 10 : upcard === 10 ? 1 : null;
-  let at = shoe.length - 1;
-  while (natural !== null && at >= 0 && shoe[at] === natural) at -= 1;
-  const hole = shoe.splice(at, 1)[0];
+  const hole = natural === null ? drawFrom(live) : pullExcluding(live, natural, rng);
+  const holeIndex = taken.length;
+  taken.push(hole);
 
   return {
     rules,
     bet,
-    shoe,
+    shoe: live,
+    ownShoe: !shoe,
+    taken,
+    holeIndex,
     hole,
     upcard,
     dealerCards: [upcard],
@@ -57,6 +49,13 @@ export function startRound({ playerCards, upcard, rules, bet = 1, rng = Math.ran
     stage: 'player',
     result: null,
   };
+}
+
+// Everything the player can see right now. The hole card sits in the taken list
+// from the start but stays out of this until it is turned over.
+export function exposedCards(game) {
+  if (game.revealed) return [...game.taken];
+  return game.taken.filter((_, i) => i !== game.holeIndex);
 }
 
 export function activeHand(game) {
@@ -76,7 +75,11 @@ export function legalMoves(game) {
   return moves;
 }
 
-const draw = (game) => game.shoe.pop();
+function draw(game) {
+  const card = drawFrom(game.shoe);
+  game.taken.push(card);
+  return card;
+}
 
 function advance(game) {
   while (game.active < game.hands.length && handDone(game.hands[game.active])) game.active += 1;
