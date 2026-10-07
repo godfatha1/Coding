@@ -561,3 +561,43 @@ details.compare[open] > summary::after { transform: rotate(180deg); }
   font: 800 12px/1 var(--font-ui);
 }
 .rule-prompt + * { margin-top: 0; }
+
+/* ---------- playing it out ---------- */
+.bankbar {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+  padding: 10px 13px;
+}
+.bank-now { font: 700 22px/1 var(--font-display); letter-spacing: -.02em; }
+.bank-net { font-size: 13.5px; font-weight: 700; color: var(--muted); }
+.bankbar.up .bank-net { color: var(--win); }
+.bankbar.down .bank-net { color: var(--lose); }
+.bank-sub { margin-left: auto; font-size: 11.5px; color: var(--muted); }
+
+.hand-row.live .hand-label .eyebrow { color: var(--accent); }
+.hand-row.live .cards { position: relative; }
+.stake {
+  font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 999px;
+  background: var(--surface-2); color: var(--muted); font-variant-numeric: tabular-nums;
+}
+.stake.doubled { background: color-mix(in oklab, var(--a-double) 20%, var(--surface)); color: var(--a-double); }
+
+.live { display: grid; gap: 9px; border: 1px solid var(--accent); background: var(--accent-soft); border-radius: 12px; padding: 11px; }
+.live-head { display: flex; align-items: baseline; gap: 8px; }
+.live-note { margin-left: auto; font-size: 11.5px; color: var(--muted); }
+
+.settle { display: grid; gap: 4px; border: 1px solid var(--line); border-radius: 12px; padding: 11px 13px; background: var(--surface-2); }
+.settle.good { border-color: color-mix(in oklab, var(--win) 45%, var(--line)); }
+.settle.bad { border-color: color-mix(in oklab, var(--lose) 45%, var(--line)); }
+.settle-top { display: flex; align-items: baseline; gap: 10px; }
+.settle-amount { font: 700 26px/1 var(--font-display); letter-spacing: -.02em; }
+.settle.good .settle-amount { color: var(--win); }
+.settle.bad .settle-amount { color: var(--lose); }
+.settle-bank { margin-left: auto; font-size: 12.5px; font-weight: 650; color: var(--muted); font-variant-numeric: tabular-nums; }
+.settle-detail { margin: 0; font-size: 12.5px; color: var(--fg-2); }
+
+/* ---------- bankroll curve ---------- */
+.bank-chart { display: block; width: 100%; height: auto; overflow: visible; }
+.bank-chart .ax { font: 600 9px var(--font-ui); fill: var(--muted); font-variant-numeric: tabular-nums; }
+.bank-chart .ax.dim { fill: var(--line-strong); }
+.bank-chart .ax.end { font-weight: 800; fill: var(--fg); }

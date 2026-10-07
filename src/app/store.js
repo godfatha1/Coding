@@ -9,11 +9,34 @@ export const DEFAULT_SETTINGS = {
   retireStreak: 3,
   filter: 'all',
   mode: 'play',          // 'play' = name the action, 'hands' = name the hands, 'mix' = both
+  table: false,          // play the hand out for money after the graded call
+  bet: 25,
   theme: 'system',
   haptics: true,
   oddsUpFront: false,
   chartProgress: true,
 };
+
+export function freshBank(start) {
+  return { start, balance: start, hands: 0, wagered: 0, won: 0, lost: 0, pushed: 0, peak: start, low: start, history: [start] };
+}
+
+// Only the most recent stretch of the curve is kept; the totals above are exact
+// whatever happens to the history.
+const HISTORY_CAP = 400;
+
+export function recordRound(bank, result) {
+  bank.hands += 1;
+  bank.wagered += result.wagered;
+  bank.balance = Math.round((bank.balance + result.delta) * 100) / 100;
+  if (result.delta > 0) bank.won += 1;
+  else if (result.delta < 0) bank.lost += 1;
+  else bank.pushed += 1;
+  bank.peak = Math.max(bank.peak, bank.balance);
+  bank.low = Math.min(bank.low, bank.balance);
+  bank.history.push(bank.balance);
+  if (bank.history.length > HISTORY_CAP) bank.history.splice(0, bank.history.length - HISTORY_CAP);
+}
 
 function freshState() {
   return {
@@ -24,6 +47,7 @@ function freshState() {
     cards: {},
     ruleCards: {},
     lifetime: { answered: 0, correct: 0, shaky: 0, bestStreak: 0 },
+    bank: freshBank(1000),
     session: { answered: 0, correct: 0, streak: 0, recent: [] },
   };
 }
@@ -41,6 +65,7 @@ export function loadState() {
     ...saved,
     settings: { ...base.settings, ...(saved.settings || {}), rules: normalizeRules(saved.settings?.rules) },
     lifetime: { ...base.lifetime, ...(saved.lifetime || {}) },
+    bank: saneBank(saved.bank, base.bank),
     session: { ...base.session },
     cards: {},
     ruleCards: {},
@@ -66,7 +91,7 @@ export function saveState(state) {
     }
     localStorage.setItem(KEY, JSON.stringify({
       version: 1, settings: state.settings, step: state.step, sinceNew: state.sinceNew,
-      cards, ruleCards: state.ruleCards, lifetime: state.lifetime,
+      cards, ruleCards: state.ruleCards, lifetime: state.lifetime, bank: state.bank,
     }));
     return true;
   } catch { return false; }
@@ -91,12 +116,21 @@ export function ensureCard(state, id) {
   return state.cards[id];
 }
 
+function saneBank(saved, fallback) {
+  if (!saved || typeof saved !== 'object' || !Array.isArray(saved.history)) return fallback;
+  const bank = { ...fallback, ...saved };
+  bank.history = saved.history.filter((n) => Number.isFinite(n)).slice(-HISTORY_CAP);
+  if (!bank.history.length) bank.history = [bank.start];
+  return bank;
+}
+
 export function clearProgress(state) {
   state.cards = {};
   state.ruleCards = {};
   state.step = 0;
   state.sinceNew = 0;
   state.lifetime = { answered: 0, correct: 0, shaky: 0, bestStreak: 0 };
+  state.bank = freshBank(state.bank?.start ?? 1000);
   state.session = { answered: 0, correct: 0, streak: 0, recent: [] };
   saveState(state);
 }
@@ -105,7 +139,7 @@ export function exportJSON(state) {
   return JSON.stringify({
     version: 1, exported: new Date().toISOString(),
     settings: state.settings, step: state.step, sinceNew: state.sinceNew,
-    cards: state.cards, ruleCards: state.ruleCards, lifetime: state.lifetime,
+    cards: state.cards, ruleCards: state.ruleCards, lifetime: state.lifetime, bank: state.bank,
   }, null, 1);
 }
 
@@ -119,6 +153,7 @@ export function importJSON(text) {
     step: Number(parsed.step) || 0,
     sinceNew: Number(parsed.sinceNew) || 0,
     lifetime: { ...base.lifetime, ...(parsed.lifetime || {}) },
+    bank: saneBank(parsed.bank, base.bank),
     cards: {},
     ruleCards: {},
   };

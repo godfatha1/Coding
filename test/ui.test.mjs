@@ -96,8 +96,8 @@ say(await page.locator('.sheet').count() === 0, 'the sheet closes');
 // --- progress ---
 await page.locator('.tab[data-view="stats"]').click();
 await page.waitForSelector('.tiles');
-say(await page.locator('.tile').count() === 4, 'four progress tiles');
-const tileVals = await page.locator('.tile .val').allTextContents();
+say(await page.locator('.tiles').first().locator('.tile').count() === 4, 'four progress tiles');
+const tileVals = await page.locator('.tiles').first().locator('.tile .val').allTextContents();
 say(tileVals.every((v) => v.length > 0), `tiles carry values (${tileVals.join(' / ')})`);
 await page.waitForTimeout(350);
 await page.screenshot({ path: join(shots, 'dark-progress.png'), fullPage: true });
@@ -192,6 +192,113 @@ say(sawPlay && sawRule, 'mix deals both kinds of question');
 
 await page.locator('.seg[data-mode="play"]').click();
 await page.waitForSelector('.action');
+
+// --- playing the hand out for money ---
+await page.locator('.tab[data-view="settings"]').click();
+await page.locator('[data-opt="table"]').click();
+await page.locator('[data-opt="bet:10"]').click();
+await page.locator('.tab[data-view="drill"]').click();
+await page.waitForSelector('#answer .action');
+say(!(await page.locator('#bankbar').isHidden()), 'the bankroll shows once money is on');
+say(/\$1,000/.test(await page.locator('#bankbar').innerText()), 'it opens at the starting bankroll');
+
+// One hand, start to finish.
+await page.locator('#answer .action').first().click();
+await page.waitForSelector('#answer .live, #answer .settle');
+say(await page.locator('#nextBtn').count() === 0 || await page.locator('#answer .settle').count() === 1,
+  'the next hand is withheld until the bet is settled');
+let guard = 0;
+while (await page.locator('#answer .live').count() && guard++ < 14) {
+  const stand = page.locator('[data-play="stand"]');
+  if (await stand.count()) await stand.click(); else await page.locator('[data-play]').first().click();
+  await page.waitForTimeout(20);
+}
+await page.waitForSelector('.settle');
+say(await page.locator('.settle').count() === 1, 'the bet settles');
+const settleText = await page.locator('.settle').innerText();
+say(/\$\d/.test(settleText), `the settle names an amount (${settleText.split('\n')[0]})`);
+say(await page.locator('.settle').innerText().then((t) => /Dealer|never had to play/.test(t)), 'the settle says what the dealer did');
+say(await page.locator('#nextBtn').count() === 1, 'next hand returns once settled');
+say(await page.locator('.odds-figures').count() === 1, 'the odds are still there under the money');
+await page.waitForTimeout(350);
+await page.screenshot({ path: join(shots, 'table.png'), fullPage: true });
+
+// The bank moves by the stake, never by some other number.
+const bankAfterOne = Number((await page.locator('#bankbar').innerText()).match(/\$([\d,]+)/)[1].replace(/,/g, ''));
+say([980, 990, 1000, 1010, 1020].includes(bankAfterOne), `a $10 hand moves the bank by a multiple of the stake (${bankAfterOne})`);
+
+for (let i = 0; i < 14; i += 1) {
+  await page.locator('#nextBtn').click();
+  await page.waitForSelector('#answer .action');
+  await page.locator('#answer .action').first().click();
+  await page.waitForSelector('#answer .live, #answer .settle');
+  let g2 = 0;
+  while (await page.locator('#answer .live').count() && g2++ < 14) {
+    const stand = page.locator('[data-play="stand"]');
+    if (await stand.count()) await stand.click(); else await page.locator('[data-play]').first().click();
+    await page.waitForTimeout(20);
+  }
+  await page.waitForSelector('.settle');
+}
+say(/15 hands/.test(await page.locator('#bankbar').innerText()), 'the bankroll counts every settled hand');
+
+await page.locator('.tab[data-view="stats"]').click();
+await page.waitForSelector('.bank-chart');
+const curve = (await page.locator('.bank-chart polyline').getAttribute('points')).trim().split(/\s+/);
+say(curve.length === 16, `the curve plots the opening bankroll and every hand (${curve.length} points)`);
+const finite = curve.every((pt) => pt.split(',').every((n) => Number.isFinite(Number(n))));
+say(finite, 'every point on the curve is a real coordinate');
+say((await page.locator('.bank-chart text').allTextContents()).every((t) => /^\$|^\u2212\$/.test(t)), 'chart labels are all money');
+await page.waitForTimeout(300);
+await page.screenshot({ path: join(shots, 'bankroll.png'), fullPage: true });
+
+// A split rewrites a hand in place; the faces on screen must follow it.
+await page.locator('.tab[data-view="chart"]').click();
+await page.waitForSelector('.grid .cell');
+await page.locator('.cell[data-cell="p8-6"]').click();
+await page.waitForSelector('.sheet');
+await page.locator('[data-sheet-action="drill"]').click();
+await page.waitForSelector('#answer .action[data-action="split"]');
+await page.locator('#answer .action[data-action="split"]').click();
+await page.waitForSelector('#answer .live, #answer .settle');
+const rows = await page.locator('#felt .hand-row').count();
+say(rows === 3, `a split puts two hands on the table (${rows - 1})`);
+const shownTotals = await page.locator('#felt .hand-row').evaluateAll((els) => els.slice(1).map((el) => ({
+  stated: Number(el.querySelector('.hand-total').textContent.replace(/\D/g, '')),
+  ranks: [...el.querySelectorAll('.card .r')].map((r) => r.textContent),
+})));
+const faceValue = (r) => (r === 'A' ? 11 : ['J', 'Q', 'K', '10'].includes(r) ? 10 : Number(r));
+const facesMatch = shownTotals.every((h) => h.ranks.reduce((a, r) => a + faceValue(r), 0) === h.stated);
+say(facesMatch, `the cards on screen add up to the totals shown (${shownTotals.map((h) => `${h.ranks.join('+')}=${h.stated}`).join(' , ')})`);
+const stakes = await page.locator('#felt .stake').allTextContents();
+say(stakes.length === 2 && stakes.every((t) => t === stakes[0]), `each split hand carries its own stake (${stakes.join(' / ')})`);
+const moves = await page.locator('[data-play]').evaluateAll((els) => els.map((e) => e.dataset.play));
+say(!moves.includes('split') && !moves.includes('surrender'), `no resplit or surrender after a split (${moves.join(', ')})`);
+await page.waitForTimeout(300);
+await page.screenshot({ path: join(shots, 'table-split.png'), fullPage: true });
+let g3 = 0;
+while (await page.locator('#answer .live').count() && g3++ < 14) {
+  const stand = page.locator('[data-play="stand"]');
+  if (await stand.count()) await stand.click(); else await page.locator('[data-play]').first().click();
+  await page.waitForTimeout(20);
+}
+await page.waitForSelector('.settle');
+
+// Resetting the bankroll leaves the drill alone.
+const masteredBefore = await page.locator('.tile .val').first().innerText();
+await page.locator('.tab[data-view="settings"]').click();
+await page.locator('#bankResetBtn').click();
+await page.locator('#bankConfirm').click();
+await page.locator('.tab[data-view="stats"]').click();
+await page.waitForSelector('.tiles');
+say(await page.locator('.tile .val').first().innerText() === masteredBefore, 'resetting the bankroll keeps your mastered hands');
+say(/\$0/.test(await page.locator('.tile').nth(4).innerText()), `the net is back to zero after a reset (${(await page.locator('.tile').nth(4).innerText()).split('\n')[1]})`);
+
+await page.locator('.tab[data-view="settings"]').click();
+await page.locator('[data-opt="table"]').click();
+await page.locator('.tab[data-view="drill"]').click();
+await page.waitForSelector('#answer .action');
+say(await page.locator('#bankbar').isHidden(), 'turning money off hides the bankroll again');
 
 // --- a wide screen still works ---
 await page.setViewportSize({ width: 900, height: 820 });

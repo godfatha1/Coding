@@ -1,10 +1,11 @@
 import { normalizeRules, rulesSummary, RULE_PRESETS } from '../engine/rules.js';
-import { handTotal, isPair, rankLabel } from '../engine/cards.js';
+import { handTotal, isPair, rankLabel, makeDisplayCard } from '../engine/cards.js';
 import { analyzeHand } from '../engine/odds.js';
 import { lookupStrategy, chartFor, UPCARDS, codeToAction, rowLabel, rowRule } from '../engine/strategy.js';
 import { dealScenario, parseScenario, scenarioLabel, ruleGroups, HARD_TOTALS, SOFT_TOTALS, PAIR_RANKS } from '../engine/scenarios.js';
 import { gradeCard, pickNext, retireCard, reviveCard, cardCounts, dueCount, isShaky } from '../engine/srs.js';
-import { loadState, saveState, deckFor, ruleDeckFor, ensureCard, ensureRuleCard, clearProgress, exportJSON, importJSON } from './store.js';
+import { startRound, act, legalMoves, handDone } from '../engine/game.js';
+import { loadState, saveState, deckFor, ruleDeckFor, ensureCard, ensureRuleCard, clearProgress, exportJSON, importJSON, freshBank, recordRound } from './store.js';
 import { pct1, pct0, signed, ACTION_KEY, ACTION_NAME, ACTION_IMPERATIVE, ACTION_GERUND, rowBar, rowNums, outcomeBlock, cardFace, cardBack } from './format.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -20,6 +21,7 @@ let forcedId = null;
 let view = 'drill';
 let chartSelection = null;
 let quiz = null;          // the reverse question: a rule, four groups, one right
+let round = null;         // the hand being played out for money, in table mode
 
 const MODES = [
   { id: 'play', label: 'Name the play' },
@@ -44,6 +46,28 @@ function applyTheme() {
 }
 
 const upcardArticle = (up) => (up === 1 ? 'an ace' : `a ${up}`);
+
+const money = (n) => `${n < 0 ? '\u2212' : ''}$${Math.abs(Math.round(n * 100) / 100).toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
+const moneySigned = (n) => `${n > 0 ? '+' : n < 0 ? '\u2212' : ''}$${Math.abs(Math.round(n * 100) / 100).toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
+
+// Drawn cards keep the suit they were first shown with, so a redraw of the
+// screen does not reshuffle the table.
+function syncDisplay() {
+  if (!round) return;
+  round.display = round.display || { dealer: [], hands: [] };
+  // A split rewrites a hand in place without changing its length, so match on
+  // the card itself rather than trusting the count.
+  const sync = (shown, cards) => {
+    cards.forEach((v, i) => { if (!shown[i] || shown[i].value !== v) shown[i] = makeDisplayCard(v); });
+    shown.length = cards.length;
+  };
+  sync(round.display.dealer, round.dealerCards);
+  round.hands.forEach((h, i) => {
+    round.display.hands[i] = round.display.hands[i] || [];
+    sync(round.display.hands[i], h.cards);
+  });
+  round.display.hands.length = round.hands.length;
+}
 
 function buzz(ms) {
   if (!state.settings.haptics) return;
@@ -75,6 +99,7 @@ function wantsRuleQuestion() {
 // Show a rule and ask which hands it covers. The three wrong choices are drawn
 // from the same family where possible, so the answer is not given away by shape.
 function dealRule() {
+  round = null;
   const groups = ruleGroups(state.settings.rules);
   const deck = ruleDeckFor(state, groups);
   const pick = pickNext(deck, { step: state.step, lastId, sinceNew: state.sinceNew, workingSet: 6, newEvery: 4 });
@@ -108,6 +133,10 @@ function deal(id) {
   hand = dealScenario(pick.id);
   analysis = analyzeHand(hand.playerCards, hand.upcard, state.settings.rules);
   book = lookupStrategy(hand.playerCards, hand.upcard, state.settings.rules);
+  round = state.settings.table
+    ? startRound({ playerCards: hand.playerCards, upcard: hand.upcard, rules: state.settings.rules, bet: state.settings.bet })
+    : null;
+  if (round) { round.display = { dealer: [hand.dealerDisplay], hands: [[...hand.playerDisplay]] }; syncDisplay(); }
   answered = null;
   unsure = false;
   peeked = false;
@@ -151,9 +180,11 @@ function answer(action, lowConfidence) {
   lastId = card.id;
 
   tallyAnswer(correct, low);
+  // The graded call is also the opening move of the round.
+  if (round) advanceRound(action);
   saveState(state);
   buzz(correct ? 14 : [26, 50, 26]);
-  renderDrill({ felt: false });
+  renderDrill({ felt: Boolean(round) });
 }
 
 function answerRule(index, lowConfidence) {
@@ -171,6 +202,23 @@ function answerRule(index, lowConfidence) {
   saveState(state);
   buzz(correct ? 14 : [26, 50, 26]);
   renderDrill({ felt: false });
+}
+
+function advanceRound(action) {
+  act(round, action);
+  syncDisplay();
+  if (round.stage === 'done' && !round.banked) {
+    round.banked = true;
+    recordRound(state.bank, round.result);
+  }
+}
+
+function playMove(action) {
+  if (!round || round.stage !== 'player') return;
+  advanceRound(action);
+  saveState(state);
+  buzz(round.stage === 'done' ? 16 : 10);
+  renderDrill();
 }
 
 function retireCurrent() {
@@ -197,12 +245,68 @@ function renderStrip() {
     <span><b class="num">${state.session.answered}</b> hands · <b class="num">${acc}</b> right</span>
     <span class="dots" aria-label="How the last ten answers went">${state.session.recent.slice(-10).map((r) => `<i class="${r}"></i>`).join('')}</span>
     <span class="num" title="${noun} mastered${due ? `, ${due} due for review` : ''}">${counts.retired}/${counts.total}${due ? ` \u00b7 ${due} due` : ''}</span>`;
+  const bankbar = $('#bankbar');
+  bankbar.hidden = !state.settings.table;
+  if (state.settings.table) {
+    const b = state.bank;
+    const net = b.balance - b.start;
+    bankbar.className = `bankbar ${net > 0 ? 'up' : net < 0 ? 'down' : ''}`;
+    bankbar.innerHTML = `<span class="bank-now num">${money(b.balance)}</span>
+      <span class="bank-net num">${moneySigned(net)}</span>
+      <span class="bank-sub num">${b.hands} ${b.hands === 1 ? 'hand' : 'hands'} \u00b7 ${money(state.settings.bet)} a hand</span>`;
+  }
   $('#modes').innerHTML = MODES.map((m) =>
     `<button class="seg" type="button" data-mode="${m.id}" aria-pressed="${state.settings.mode === m.id}">${m.label}</button>`).join('');
 }
 
+function settleText() {
+  const r = round.result;
+  const alive = r.perHand.some((h) => !h.bust && !h.surrendered);
+  const dealer = !alive ? 'Dealer never had to play'
+    : r.dealerBust ? `Dealer busted on ${r.dealerTotal}`
+    : `Dealer ${r.dealerTotal}`;
+  const hands = r.perHand.map((h) => {
+    if (h.surrendered) return 'you took half back';
+    if (h.bust) return `your ${h.total} busted`;
+    if (h.outcome === 'win') return `your ${h.total} won`;
+    if (h.outcome === 'push') return `your ${h.total} pushed`;
+    return `your ${h.total} lost`;
+  });
+  return `${dealer} · ${hands.join(' · ')}`;
+}
+
+function renderTableFelt() {
+  syncDisplay();
+  const d = round.display;
+  const dealerHead = round.revealed ? String(handTotal(round.dealerCards).total) : rankLabel(round.upcard);
+  const dealerCards = round.revealed ? d.dealer.map(cardFace).join('') : cardFace(d.dealer[0]) + cardBack;
+  const many = round.hands.length > 1;
+
+  const hands = round.hands.map((h, i) => {
+    const { total, soft } = handTotal(h.cards);
+    const live = round.stage === 'player' && i === round.active;
+    const where = h.bust ? 'Bust' : h.surrendered ? 'Gave up' : `${soft ? 'Soft ' : ''}${total}`;
+    return `<div class="hand-row${live ? ' live' : ''}">
+      <div class="hand-label">
+        <span class="eyebrow">${many ? `Hand ${i + 1}` : 'Your hand'}</span>
+        <span class="stake${h.doubled ? ' doubled' : ''}">${money(h.bet)}</span>
+        <span class="hand-total">${where}</span>
+      </div>
+      <div class="cards">${d.hands[i].map(cardFace).join('')}</div>
+    </div>`;
+  }).join('');
+
+  $('#felt').innerHTML = `
+    <div class="hand-row">
+      <div class="hand-label"><span class="eyebrow">Dealer</span><span class="hand-total num">${dealerHead}</span></div>
+      <div class="cards">${dealerCards}</div>
+    </div>
+    ${hands}`;
+}
+
 function renderFelt() {
   if (!hand) { $('#felt').innerHTML = '<p class="empty">Nothing left in this filter. Every hand here is mastered.</p>'; return; }
+  if (round) { renderTableFelt(); return; }
   const { total, soft } = handTotal(hand.playerCards);
   const pair = isPair(hand.playerCards);
   const handName = pair
@@ -351,6 +455,38 @@ function renderPending() {
     </div>`;
 }
 
+// In table mode the round has to finish before the next hand is offered, so the
+// live controls take the place of those buttons until the bet is settled.
+function tableBlock(justRetired) {
+  const buttons = `<div class="btn-row">
+    ${justRetired
+      ? '<span class="note" style="flex:1 1 auto;align-self:center">Mastered. You will not see this hand again.</span>'
+      : '<button class="btn" id="retireBtn" type="button">Too easy — retire</button>'}
+    <button class="btn btn-primary" id="nextBtn" type="button">Next hand</button>
+  </div>`;
+  if (!round) return buttons;
+
+  if (round.stage === 'player') {
+    const moves = legalMoves(round);
+    const live = ['hit', 'stand', 'double', 'split', 'surrender'].filter((a) => moves.includes(a));
+    return `<div class="live">
+      <div class="live-head"><span class="eyebrow">Play it out</span>
+        <span class="live-note">${round.hands.length > 1 ? `Hand ${round.active + 1} of ${round.hands.length}` : 'Finish the hand'}</span></div>
+      <div class="actions">${live.map((a, i) => `<button class="action a-${a}${live.length % 2 === 1 && i === live.length - 1 ? ' wide' : ''}" type="button" data-play="${a}">
+          <span class="key">${ACTION_KEY[a]}</span>${ACTION_NAME[a]}</button>`).join('')}</div>
+    </div>`;
+  }
+
+  const delta = round.result.delta;
+  const tone = delta > 0 ? 'good' : delta < 0 ? 'bad' : 'flat';
+  return `<div class="settle ${tone}">
+      <div class="settle-top"><span class="settle-amount">${moneySigned(delta)}</span>
+        <span class="settle-bank">Bank ${money(state.bank.balance)}</span></div>
+      <p class="settle-detail">${settleText()}</p>
+    </div>
+    ${buttons}`;
+}
+
 function renderAnswered() {
   const bookEntry = analysis.actions[book.action];
   const yours = analysis.actions[answered.action];
@@ -369,12 +505,7 @@ function renderAnswered() {
         </div>
       </div>
 
-      <div class="btn-row">
-        ${justRetired
-          ? '<span class="note" style="flex:1 1 auto;align-self:center">Mastered. You will not see this hand again.</span>'
-          : `<button class="btn" id="retireBtn" type="button">Too easy — retire</button>`}
-        <button class="btn btn-primary" id="nextBtn" type="button">Next hand</button>
-      </div>
+      ${tableBlock(justRetired)}
 
       <div class="odds-hero">
         <div class="section-head" style="margin:0">
@@ -498,10 +629,48 @@ function openCellSheet(id) {
 
 /* ---------------- progress view ---------------- */
 
+// The bankroll over time. One series, so no legend: the heading names it.
+function bankChart() {
+  const b = state.bank;
+  const h = b.history;
+  if (h.length < 2) return '<p class="empty">Turn on Play the hand out in Settings and the curve starts here.</p>';
+
+  const W = 340, H = 142, L = 48, R = 54, T = 16, B = 20;
+  const lo = Math.min(...h, b.start);
+  const hi = Math.max(...h, b.start);
+  const pad = (hi - lo) * 0.1 || Math.max(1, b.start * 0.02);
+  const [y0, y1] = [lo - pad, hi + pad];
+  const x = (i) => L + (i / (h.length - 1)) * (W - L - R);
+  const y = (v) => T + (1 - (v - y0) / (y1 - y0)) * (H - T - B);
+
+  const net = b.balance - b.start;
+  const tone = net >= 0 ? 'var(--win)' : 'var(--lose)';
+  const pts = h.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  const endX = x(h.length - 1);
+  const endY = y(b.balance);
+  const startY = y(b.start);
+  // Only label the start line when it will not sit on top of the high or low label.
+  const roomy = Math.abs(startY - y(hi)) > 13 && Math.abs(startY - y(lo)) > 13;
+
+  return `<svg viewBox="0 0 ${W} ${H}" class="bank-chart" role="img"
+      aria-label="Bankroll over ${b.hands} hands, from ${money(b.start)} to ${money(b.balance)}">
+    <line x1="${L}" y1="${startY.toFixed(1)}" x2="${W - R}" y2="${startY.toFixed(1)}" stroke="var(--line-strong)" stroke-width="1"/>
+    <polygon points="${L},${(H - B).toFixed(1)} ${pts} ${endX.toFixed(1)},${(H - B).toFixed(1)}" fill="${tone}" opacity="0.1"/>
+    <polyline points="${pts}" fill="none" stroke="${tone}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+    <circle cx="${endX.toFixed(1)}" cy="${endY.toFixed(1)}" r="4" fill="${tone}" stroke="var(--surface)" stroke-width="2"/>
+    <text x="${L - 6}" y="${(y(hi) + 3.5).toFixed(1)}" class="ax" text-anchor="end">${money(hi)}</text>
+    <text x="${L - 6}" y="${(y(lo) + 3.5).toFixed(1)}" class="ax" text-anchor="end">${money(lo)}</text>
+    ${roomy ? `<text x="${L - 6}" y="${(startY + 3.5).toFixed(1)}" class="ax dim" text-anchor="end">${money(b.start)}</text>` : ''}
+    <text x="${(endX + 7).toFixed(1)}" y="${(endY + 3.5).toFixed(1)}" class="ax end">${money(b.balance)}</text>
+  </svg>`;
+}
+
 function renderStats() {
   const deck = deckFor(state);
   const counts = cardCounts(deck);
   const ruleCounts = cardCounts(ruleDeckFor(state, ruleGroups(state.settings.rules)));
+  const bank = state.bank;
+  const net = bank.balance - bank.start;
   const lifeAcc = state.lifetime.answered ? state.lifetime.correct / state.lifetime.answered : null;
 
   const groups = [
@@ -534,6 +703,19 @@ function renderStats() {
       <div class="tile"><span class="cap">Lifetime accuracy</span><span class="val num">${lifeAcc === null ? '--' : pct0(lifeAcc)}</span><span class="sub">${state.lifetime.answered} hands played</span></div>
       <div class="tile"><span class="cap">Shaky hands</span><span class="val num">${counts.shaky}</span><span class="sub">missed or flagged</span></div>
       <div class="tile"><span class="cap">Best streak</span><span class="val num">${state.lifetime.bestStreak}</span><span class="sub">${state.session.streak} right now</span></div>
+    </div>
+
+    <div class="panel">
+      <div class="section-head"><h2 class="section-title">Bankroll</h2>
+        <span class="section-note">${bank.hands ? `${bank.hands} ${bank.hands === 1 ? 'hand' : 'hands'} played` : 'not started'}</span></div>
+      ${bankChart()}
+      <div class="tiles" style="margin-top:12px">
+        <div class="tile"><span class="cap">Net</span><span class="val num" style="color:${net > 0 ? 'var(--win)' : net < 0 ? 'var(--lose)' : 'inherit'}">${moneySigned(net)}</span><span class="sub">from ${money(bank.start)}</span></div>
+        <div class="tile"><span class="cap">Per hand</span><span class="val num">${bank.hands ? moneySigned(net / bank.hands) : '--'}</span><span class="sub">average swing</span></div>
+        <div class="tile"><span class="cap">Return</span><span class="val num">${bank.wagered ? `${net < 0 ? '\u2212' : net > 0 ? '+' : ''}${Math.abs(net / bank.wagered * 100).toFixed(1)}%` : '--'}</span><span class="sub">on ${money(bank.wagered)} wagered</span></div>
+        <div class="tile"><span class="cap">Won</span><span class="val num">${bank.hands ? pct0(bank.won / bank.hands) : '--'}</span><span class="sub">${bank.won}W ${bank.pushed}P ${bank.lost}L</span></div>
+      </div>
+      <p class="note" style="margin-top:10px">High ${money(bank.peak)} · low ${money(bank.low)}. Reset the bankroll in Settings.</p>
     </div>
 
     <div class="panel">
@@ -620,6 +802,29 @@ function renderSettings() {
       <div class="field">
         <div class="field-head"><span class="name">Vibrate on answer</span>
           <button class="switch" role="switch" data-opt="haptics" aria-checked="${s.haptics}" aria-label="Vibrate on answer"></button></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="section-head"><h2 class="section-title">Money</h2>
+        <span class="section-note">${s.table ? `${money(state.bank.balance)} in the bank` : 'off'}</span></div>
+      <div class="field">
+        <div class="field-head"><span class="name">Play the hand out</span>
+          <button class="switch" role="switch" data-opt="table" aria-checked="${s.table}" aria-label="Play the hand out"></button></div>
+        <p class="field-desc">After the graded call, finish the hand against the dealer and settle the bet. Cards come from a real ${r.decks}-deck shoe with the cards you can see taken out.</p>
+      </div>
+      <div class="field">
+        <div class="field-head"><span class="name">Bet a hand</span></div>
+        <div class="chips">${[5, 10, 25, 100].map((n) => opt(`bet:${n}`, money(n), s.bet === n)).join('')}</div>
+      </div>
+      <div class="field">
+        <div class="field-head"><span class="name">Bankroll</span></div>
+        <p class="field-desc">${state.bank.hands
+          ? `${money(state.bank.balance)} after ${state.bank.hands} ${state.bank.hands === 1 ? 'hand' : 'hands'}, ${moneySigned(state.bank.balance - state.bank.start)} on ${money(state.bank.wagered)} wagered.`
+          : 'No hands played yet.'}</p>
+        <div class="chips">${[500, 1000, 5000].map((n) => opt(`bankstart:${n}`, money(n), state.bank.start === n)).join('')}</div>
+        <div id="bankZone"><button class="btn danger" id="bankResetBtn" type="button">Reset bankroll</button></div>
+        <p class="field-desc">Resetting the bankroll clears the money and the curve. It leaves your mastered hands alone.</p>
       </div>
     </div>
 
@@ -739,7 +944,7 @@ let holdFired = false;
 
 $('#answer').addEventListener('pointerdown', (e) => {
   const btn = e.target.closest('.action, .option');
-  if (!btn || btn.disabled) return;
+  if (!btn || btn.disabled || btn.dataset.play) return;
   holdFired = false;
   holdTimer = setTimeout(() => {
     holdFired = true;
@@ -757,6 +962,8 @@ $('#answer').addEventListener('pointerleave', clearHold);
 $('#answer').addEventListener('click', (e) => {
   clearHold();
   if (holdFired) { holdFired = false; return; }
+  const live = e.target.closest('[data-play]');
+  if (live) { playMove(live.dataset.play); return; }
   const act = e.target.closest('.action');
   if (act) { answer(act.dataset.action, false); return; }
   const opt = e.target.closest('.option');
@@ -823,6 +1030,13 @@ $('#settingsHost').addEventListener('click', (e) => {
     else if (kind === 'theme') { state.settings.theme = value; applyTheme(); }
     else if (kind === 'oddsUpFront') state.settings.oddsUpFront = !state.settings.oddsUpFront;
     else if (kind === 'haptics') state.settings.haptics = !state.settings.haptics;
+    else if (kind === 'table') { state.settings.table = !state.settings.table; deal(); }
+    else if (kind === 'bet') {
+      state.settings.bet = Number(value);
+      // A hand that has not been acted on yet takes the new stake.
+      if (round && !answered) { round.bet = state.settings.bet; round.hands[0].bet = state.settings.bet; }
+    }
+    else if (kind === 'bankstart') { state.bank = freshBank(Number(value)); }
     state.settings.rules = normalizeRules(state.settings.rules);
     rulesChanged();
     renderSettings();
@@ -849,6 +1063,18 @@ $('#settingsHost').addEventListener('click', (e) => {
     } catch (err) {
       $('#ioNote').textContent = `Could not read that: ${err.message}`;
     }
+    return;
+  }
+  if (e.target.closest('#bankResetBtn')) {
+    $('#bankZone').innerHTML = '<div class="btn-row"><button class="btn" id="bankCancel" type="button">Keep it</button>'
+      + '<button class="btn danger" id="bankConfirm" type="button">Reset the bankroll</button></div>';
+    return;
+  }
+  if (e.target.closest('#bankCancel')) { renderSettings(); return; }
+  if (e.target.closest('#bankConfirm')) {
+    state.bank = freshBank(state.bank.start);
+    saveState(state);
+    renderSettings();
     return;
   }
   if (e.target.closest('#resetBtn')) {
@@ -881,11 +1107,16 @@ document.addEventListener('keydown', (e) => {
     if (n >= 1 && n <= quiz.options.length) { e.preventDefault(); answerRule(n - 1, e.shiftKey); }
     return;
   }
+  const keyToAction = { h: 'hit', s: 'stand', d: 'double', p: 'split', r: 'surrender' };
+  if (round && round.stage === 'player' && answered) {
+    if (keyToAction[k] && legalMoves(round).includes(keyToAction[k])) { e.preventDefault(); playMove(keyToAction[k]); }
+    return;
+  }
   if (answered) {
     if (k === 'enter' || k === ' ' || k === 'n') { e.preventDefault(); deal(); }
     return;
   }
-  const map = { h: 'hit', s: 'stand', d: 'double', p: 'split', r: 'surrender' };
+  const map = keyToAction;
   if (k === 'u') { unsure = !unsure; renderPending(); return; }
   const action = map[k];
   if (action && legalActions().includes(action)) {

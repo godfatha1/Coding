@@ -32,6 +32,19 @@ share a rule are one answer, which surfaces things the chart hides — hard 9 an
 soft 17 take the same rule, and so do 2,2, 3,3 and 7,7. *Mix* deals both. The
 two styles keep separate decks and separate mastery.
 
+**Plays for money.** Turn on *Play the hand out* in Settings and the graded call
+becomes the first move of a real round: you keep hitting, standing, doubling and
+splitting until the hand is over, the dealer plays, and the bet settles against a
+bankroll. Cards come from a properly shuffled shoe of the configured size with
+the three cards you can already see removed. The Progress tab draws the bankroll
+over time, with net, return on everything wagered, and your high and low. Reset
+the bankroll whenever you like; it leaves your mastered hands alone.
+
+Two things are deliberately left out, and they cancel: the dealer is never dealt
+a blackjack, and the drill never deals you one either. The app's odds are all
+quoted after the dealer peeks, so leaving naturals out of both sides keeps the
+money consistent with every number on screen.
+
 **Remembers what you find hard.** Each cell is a spaced-repetition card:
 
 | What you did | What happens |
@@ -93,7 +106,7 @@ anywhere and open it; everything works except the service worker.
 npm test
 ```
 
-172 checks across five files:
+203 checks across six files:
 
 - **`test/odds.test.mjs`** — distributions sum to one; dealer bust rates match
   published tables for all ten upcards; the infinite-deck dealer tables for 6 and
@@ -106,6 +119,12 @@ npm test
 - **`test/rules-deck.test.mjs`** — across all eight rule combinations, every
   chart row lands in exactly one rule group, no two groups share a rule, and
   every row in a group really carries that group's rule.
+- **`test/game.test.mjs`** — the shoe is a real shoe with the visible cards out;
+  the dealer is never dealt a blackjack in 8000 tries; doubling, splitting and
+  surrender settle at the right stake; split aces take one card; the dealer
+  stands pat when every player hand is dead. Then the end-to-end check: six
+  hands played out 120,000 times each return what the odds engine independently
+  says they should, within 0.014.
 - **`test/srs.test.mjs`** — retirement, low-confidence rotation, miss handling,
   and a 4000-hand simulation of a learner who is shaky on hard 15 and 16: the
   shaky cells come back 50× more often than settled ones, none of them retires,
@@ -122,6 +141,7 @@ index.html              app shell and markup
 src/styles.css          tokens and components, light and dark
 src/engine/
   rules.js              table rules and presets
+  game.js               the shoe and the round played out for money
   cards.js              hand totals, soft/hard, display cards
   odds.js               the solver
   strategy.js           the S17 and H17 charts
