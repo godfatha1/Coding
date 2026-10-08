@@ -340,3 +340,184 @@ def test_search_budget_is_respected(store, sync_cfg):
     report = engine.run()
     assert len(soundcloud.search_calls) <= 2
     assert report.searches <= 2
+
+
+# --------------------------------------------------------------------------
+# the inbox playlist
+# --------------------------------------------------------------------------
+
+from likesync.engine import INBOX_REASON, Inbox
+
+INBOX_SC = sc("scI", "Four Tet - Baby", ["Text Records"], 283_000)
+INBOX_SP = sp("spI", "Baby", ["Four Tet"], 282_000)
+
+
+def with_inbox(store, cfg, tracks, *, spotify_lib=(), soundcloud_lib=(),
+               spotify_catalog=(), soundcloud_catalog=(), fail=None):
+    spotify = FakeProvider(SPOTIFY, spotify_lib, spotify_catalog)
+    soundcloud = FakeProvider(SOUNDCLOUD, soundcloud_lib, soundcloud_catalog)
+    # The inbox playlist's tracks must be likeable, so they live in the catalog.
+    soundcloud.catalog.extend(tracks)
+
+    def fetch():
+        if fail:
+            raise fail
+        return list(tracks)
+
+    engine = SyncEngine(
+        store=store, spotify=spotify, soundcloud=soundcloud, cfg=cfg,
+        inbox=Inbox(provider=SOUNDCLOUD, fetch=fetch),
+    )
+    return engine, spotify, soundcloud
+
+
+def test_inbox_track_is_liked_and_propagated_in_one_run(store, sync_cfg):
+    engine, spotify, soundcloud = with_inbox(
+        store, sync_cfg, [INBOX_SC], spotify_catalog=[INBOX_SP]
+    )
+    report = engine.run()
+
+    # Liked on SoundCloud, and pushed to Spotify in the same run.
+    assert "scI" in soundcloud.library
+    assert "spI" in spotify.library
+    assert any(a.inbox and a.reason == INBOX_REASON for a in report.applied)
+    assert report.inbox_taken == 1
+    assert report.counts["inbox_new"] == 1
+
+
+def test_inbox_track_already_liked_needs_no_action(store, sync_cfg):
+    engine, _, soundcloud = with_inbox(
+        store, sync_cfg, [INBOX_SC],
+        soundcloud_lib=[INBOX_SC], spotify_catalog=[INBOX_SP],
+    )
+    report = engine.run()
+    assert [a for a in report.applied if a.inbox] == []
+    # Still recorded, so it is not reconsidered every run.
+    assert "scI" in store.playlist_seen(SOUNDCLOUD)
+
+
+def test_inbox_does_not_reconsider_a_track_it_has_taken_in(store, sync_cfg):
+    engine, _, _ = with_inbox(
+        store, sync_cfg, [INBOX_SC], spotify_catalog=[INBOX_SP]
+    )
+    engine.run()
+    assert store.playlist_seen(SOUNDCLOUD) == {"scI"}
+
+    # Second run, same playlist contents: nothing new to do.
+    engine2, spotify2, soundcloud2 = with_inbox(
+        store, sync_cfg, [INBOX_SC],
+        spotify_lib=[INBOX_SP], soundcloud_lib=[INBOX_SC],
+    )
+    report = engine2.run()
+    assert report.planned == []
+    assert report.counts["inbox_new"] == 0
+
+
+def test_unliking_an_inbox_track_is_not_undone_by_the_playlist(store, sync_cfg):
+    """The reason the inbox is one-way.
+
+    If playlist membership counted as part of the mirrored set, a playlist-only
+    track could never be deleted: the removal would propagate, the playlist
+    would still list it, and the next run would re-add it for ever.
+    """
+    engine, _, _ = with_inbox(
+        store, sync_cfg, [INBOX_SC], spotify_catalog=[INBOX_SP]
+    )
+    engine.run()  # now liked on both sides
+
+    # Unlike it on Spotify. The track is still sitting in the playlist.
+    engine2, spotify2, soundcloud2 = with_inbox(
+        store, sync_cfg, [INBOX_SC],
+        spotify_lib=[], soundcloud_lib=[INBOX_SC],
+    )
+    report2 = engine2.run()
+    assert [(a.provider, a.action) for a in report2.applied] == [
+        (SOUNDCLOUD, UNLIKE)
+    ]
+    assert "scI" not in soundcloud2.library
+
+    # Third run: it must stay gone, despite still being in the playlist.
+    engine3, spotify3, soundcloud3 = with_inbox(
+        store, sync_cfg, [INBOX_SC], spotify_lib=[], soundcloud_lib=[]
+    )
+    report3 = engine3.run()
+    assert report3.planned == []
+    assert soundcloud3.library == {}
+    assert spotify3.library == {}
+
+
+def test_failed_inbox_like_is_retried_next_run(store, sync_cfg):
+    engine, _, soundcloud = with_inbox(
+        store, sync_cfg, [INBOX_SC], spotify_catalog=[INBOX_SP]
+    )
+    soundcloud.fail_ids = {"scI"}
+    report = engine.run()
+
+    assert report.failed
+    # Not recorded as taken in, so the next run tries again.
+    assert store.playlist_seen(SOUNDCLOUD) == set()
+    assert report.inbox_taken == 0
+
+    engine2, _, soundcloud2 = with_inbox(
+        store, sync_cfg, [INBOX_SC], spotify_catalog=[INBOX_SP]
+    )
+    report2 = engine2.run()
+    assert "scI" in soundcloud2.library
+    assert report2.inbox_taken == 1
+
+
+def test_removing_a_track_from_the_playlist_changes_nothing(store, sync_cfg):
+    engine, _, _ = with_inbox(
+        store, sync_cfg, [INBOX_SC], spotify_catalog=[INBOX_SP]
+    )
+    engine.run()
+
+    # Playlist emptied; the like it produced stays put.
+    engine2, spotify2, soundcloud2 = with_inbox(
+        store, sync_cfg, [],
+        spotify_lib=[INBOX_SP], soundcloud_lib=[INBOX_SC],
+    )
+    report = engine2.run()
+    assert report.planned == []
+    assert "scI" in soundcloud2.library
+
+
+def test_unreadable_playlist_does_not_stop_the_likes_sync(store, sync_cfg):
+    from likesync.errors import ProviderError
+
+    engine, spotify, soundcloud = with_inbox(
+        store, sync_cfg, [INBOX_SC],
+        spotify_lib=[MIDNIGHT_SP], soundcloud_catalog=[MIDNIGHT_SC],
+        fail=ProviderError("playlist is private"),
+    )
+    report = engine.run()
+
+    assert any("playlist is private" in w for w in report.warnings)
+    # The ordinary likes sync still happened.
+    assert "sc1" in soundcloud.library
+
+
+def test_inbox_respects_ignores_and_the_length_filter(store, sync_cfg):
+    long_mix = sc("scLong", "Someone - Two Hour Set", ["Radio"], 7_200_000)
+    ignored = sc("scIgn", "Someone - Nope", ["Radio"], 200_000)
+    store.add_ignore(SOUNDCLOUD, "scIgn", "not wanted")
+    sync_cfg.skip_longer_than_ms = 900_000
+
+    engine, _, soundcloud = with_inbox(
+        store, sync_cfg, [INBOX_SC, long_mix, ignored],
+        spotify_catalog=[INBOX_SP],
+    )
+    report = engine.run()
+    assert report.counts["inbox_new"] == 1
+    assert "scLong" not in soundcloud.library
+    assert "scIgn" not in soundcloud.library
+
+
+def test_dry_run_plans_the_inbox_without_taking_it_in(store, sync_cfg):
+    engine, _, soundcloud = with_inbox(
+        store, sync_cfg, [INBOX_SC], spotify_catalog=[INBOX_SP]
+    )
+    report = engine.run(dry_run=True)
+    assert any(a.inbox for a in report.planned)
+    assert soundcloud.like_calls == []
+    assert store.playlist_seen(SOUNDCLOUD) == set()

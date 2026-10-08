@@ -42,6 +42,25 @@ class SpotifyConfig:
 
 @dataclass
 class SoundCloudConfig:
+    # "api" uses the official API and needs approved credentials, which
+    # SoundCloud has not been granting. "web" drives the site in a browser you
+    # signed in to yourself: no credentials, but read the README first.
+    mode: str = "web"
+
+    # --- "web" mode -------------------------------------------------------
+    # A playlist used as an intake queue: drop a track in and it gets liked,
+    # after which the normal two-way rules apply. Leave empty to disable.
+    playlist_url: str = ""
+    browser_executable: str = ""
+    headless: bool = True
+    # Infinite scroll: enough rounds to reach the bottom of your likes. A run
+    # that hits this limit fails rather than syncing a partial library.
+    max_scrolls: int = 400
+    settle_ms: int = 450
+    # Pause between write actions. Slow on purpose.
+    write_pause_s: float = 1.5
+
+    # --- "api" mode -------------------------------------------------------
     client_id: str = ""
     # SoundCloud treats every client as confidential, so the secret is required
     # even when using PKCE.
@@ -109,11 +128,22 @@ class Config:
     def token_path(self) -> Path:
         return self.home / "tokens.json"
 
+    @property
+    def session_path(self) -> Path:
+        """Browser profile that keeps the SoundCloud web session signed in."""
+        return self.home / "soundcloud-session.json"
+
     def validate(self, *, providers: tuple[str, ...] = ("spotify", "soundcloud")) -> None:
+        if self.soundcloud.mode not in ("api", "web"):
+            raise ConfigError(
+                f"soundcloud.mode invalid: {self.soundcloud.mode!r} "
+                '(expected "api" or "web")'
+            )
         missing = []
         if "spotify" in providers and not self.spotify.client_id:
             missing.append("spotify.client_id")
-        if "soundcloud" in providers:
+        # Web mode needs no credentials at all; it uses a browser session.
+        if "soundcloud" in providers and self.soundcloud.mode == "api":
             if not self.soundcloud.client_id:
                 missing.append("soundcloud.client_id")
             if not self.soundcloud.client_secret:

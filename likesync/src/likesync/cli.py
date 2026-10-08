@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -12,8 +13,10 @@ from . import __version__
 from .app import build_app
 from .config import Config, load_config
 from .errors import AuthError, ConfigError, LikeSyncError, QuotaExceeded
-from .models import PROVIDERS, SPOTIFY, other_provider
+from .models import PROVIDERS, SOUNDCLOUD, SPOTIFY, other_provider
 from .report import to_json, to_text
+from .secretfile import read_secret_json, write_secret_json
+from .websession import BrowserSession
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -68,6 +71,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="print the URL and paste the redirect back (headless boxes)")
     p.add_argument("--no-browser", action="store_true",
                    help="do not try to open a browser")
+    p.add_argument("--web", action="store_true",
+                   help="SoundCloud: sign in through a browser window instead "
+                        "of OAuth (the default when soundcloud.mode = web)")
+    p.add_argument("--api", action="store_true",
+                   help="SoundCloud: force the OAuth flow, for approved "
+                        "API credentials")
 
     p = sub.add_parser("logout", help="forget stored tokens for a service")
     p.add_argument("provider", choices=PROVIDERS)
@@ -91,6 +100,17 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--force-shrink", action="store_true",
                        help="proceed even if a library shrank suspiciously")
         p.add_argument("--json", action="store_true", help="emit the report as JSON")
+
+    p = sub.add_parser("probe", help="check a service is reachable and readable")
+    p.add_argument("provider", choices=PROVIDERS, nargs="?", default=SOUNDCLOUD)
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("session", help="move the SoundCloud browser sign-in "
+                                       "between machines")
+    p.add_argument("action", choices=("export", "import", "path", "forget"))
+
+    p = sub.add_parser("reseed", help="take the whole inbox playlist in again")
+    p.add_argument("--yes", action="store_true")
 
     p = sub.add_parser("unmatched", help="tracks with no counterpart")
     p.add_argument("--review", action="store_true",
@@ -133,7 +153,26 @@ def build_parser() -> argparse.ArgumentParser:
 # ---------------------------------------------------------------------------
 
 
+def _soundcloud_web(args: argparse.Namespace, cfg: Config) -> bool:
+    if getattr(args, "api", False):
+        return False
+    return getattr(args, "web", False) or cfg.soundcloud.mode == "web"
+
+
 def cmd_login(args: argparse.Namespace, cfg: Config) -> int:
+    if args.provider == SOUNDCLOUD and _soundcloud_web(args, cfg):
+        session = BrowserSession(
+            state_path=cfg.session_path,
+            executable_path=cfg.soundcloud.browser_executable or None,
+            headless=False,
+        )
+        try:
+            session.login()
+        finally:
+            session.close()
+        print("\nNow check it works:  likesync probe soundcloud")
+        return EXIT_OK
+
     cfg.validate(providers=(args.provider,))
     app = build_app(cfg)
     try:
@@ -178,6 +217,19 @@ def cmd_status(args: argparse.Namespace, cfg: Config) -> int:
               f"   unlikes: {'on' if cfg.sync.propagate_unlikes else 'off'}")
         print()
         for name in PROVIDERS:
+            if name == SOUNDCLOUD and cfg.soundcloud.mode == "web":
+                # Web mode has no tokens; what matters is the browser sign-in.
+                if cfg.session_path.exists():
+                    age_h = (time.time() - cfg.session_path.stat().st_mtime) / 3600
+                    print(f"  {name:<11} browser session saved "
+                          f"(refreshed {age_h:.0f}h ago)")
+                    print(f"              mirror: "
+                          f"{len(app.store.mirror(name))} tracks")
+                else:
+                    print(f"  {name:<11} no browser session — run: "
+                          f"likesync login soundcloud --web")
+                continue
+
             tokens = app.tokens.load(name)
             if not tokens.usable:
                 print(f"  {name:<11} not connected — run: likesync login {name}")
@@ -199,6 +251,10 @@ def cmd_status(args: argparse.Namespace, cfg: Config) -> int:
             print(f"  {name:<11} connected ({when}{extra})")
             print(f"              mirror: {len(app.store.mirror(name))} tracks")
         print()
+        if cfg.soundcloud.playlist_url:
+            taken = len(app.store.playlist_seen(SOUNDCLOUD))
+            print(f"  inbox      {cfg.soundcloud.playlist_url}")
+            print(f"             {taken} track(s) taken in so far")
         print(f"  links      {app.store.count_links()} paired tracks")
         print(f"  unmatched  {len(app.store.attempts_by_status('unmatched'))}")
         print(f"  review     {len(app.store.attempts_by_status('review'))}")
@@ -242,6 +298,111 @@ def cmd_sync(args: argparse.Namespace, cfg: Config) -> int:
         return EXIT_ABORTED
     if report.failed:
         return EXIT_PARTIAL
+    return EXIT_OK
+
+
+def cmd_probe(args: argparse.Namespace, cfg: Config) -> int:
+    """Check a provider end to end without changing anything."""
+    app = build_app(cfg)
+    try:
+        provider = app.providers[args.provider]
+        probe = getattr(provider, "probe", None)
+        if probe is None:
+            print(f"{args.provider} has no probe in "
+                  f"{cfg.soundcloud.mode if args.provider == SOUNDCLOUD else 'api'}"
+                  " mode. Use `likesync plan` instead.")
+            return EXIT_OK
+        report = probe()
+        if args.json:
+            import json
+
+            print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
+            return EXIT_OK
+
+        for check in report.get("checks", []):
+            name = check.pop("check", "")
+            detail = ", ".join(f"{k}={v}" for k, v in check.items() if v != [])
+            print(f"  {name}\n      {detail}")
+        verdict = report.get("verdict", "")
+        if verdict:
+            print(f"\nVerdict: {verdict}")
+        if report.get("note"):
+            print(f"Note: {report['note']}")
+        return EXIT_OK if verdict.startswith("ready") else EXIT_ERROR
+    finally:
+        app.close()
+
+
+def cmd_session(args: argparse.Namespace, cfg: Config) -> int:
+    """Move or inspect the saved SoundCloud browser sign-in."""
+    import base64
+    import json
+
+    path = cfg.session_path
+    if args.action == "path":
+        print(path)
+        return EXIT_OK
+
+    if args.action == "forget":
+        if path.exists():
+            path.unlink()
+            print(f"Removed {path}. Re-run: likesync login soundcloud --web")
+        else:
+            print("No saved session.")
+        return EXIT_OK
+
+    if args.action == "export":
+        state = read_secret_json(path)
+        if state is None:
+            print("No saved session to export. Run: likesync login soundcloud "
+                  "--web", file=sys.stderr)
+            return EXIT_ERROR
+        print(base64.b64encode(json.dumps(state).encode()).decode())
+        print(
+            "\nSet this as LIKESYNC_SESSION on the machine that runs the sync, "
+            "then `likesync session import`.\nIt is a live sign-in to your "
+            "SoundCloud account — treat it like a password.",
+            file=sys.stderr,
+        )
+        return EXIT_OK
+
+    blob = os.environ.get("LIKESYNC_SESSION", "").strip()
+    if not blob:
+        print("Set LIKESYNC_SESSION to the output of `likesync session export` "
+              "first.", file=sys.stderr)
+        return EXIT_CONFIG
+    try:
+        state = json.loads(base64.b64decode(blob + "=" * (-len(blob) % 4)))
+    except Exception as exc:  # noqa: BLE001 - any malformed input, one message
+        print(f"LIKESYNC_SESSION is not a valid export: {exc}", file=sys.stderr)
+        return EXIT_CONFIG
+    write_secret_json(path, state)
+    print(f"Imported the SoundCloud session to {path}")
+    print("Check it with: likesync probe soundcloud")
+    return EXIT_OK
+
+
+def cmd_reseed(args: argparse.Namespace, cfg: Config) -> int:
+    """Forget which inbox tracks were taken in, so the playlist is re-read."""
+    app = build_app(cfg)
+    try:
+        count = len(app.store.playlist_seen(SOUNDCLOUD))
+        if not count:
+            print("The inbox has nothing recorded; the next run reads the whole "
+                  "playlist already.")
+            return EXIT_OK
+        print(f"{count} inbox track(s) are recorded as taken in.")
+        print("Clearing this means every track still in the playlist is liked "
+              "again — including any you have since unliked on purpose.")
+        if not args.yes and input("Proceed? [y/N] ").strip().lower() not in (
+            "y", "yes"
+        ):
+            print("Cancelled.")
+            return EXIT_OK
+        app.store.forget_playlist_seen(SOUNDCLOUD)
+        print(f"Cleared {count} record(s).")
+    finally:
+        app.close()
     return EXIT_OK
 
 
@@ -442,6 +603,9 @@ COMMANDS = {
     "login": cmd_login,
     "logout": cmd_logout,
     "status": cmd_status,
+    "probe": cmd_probe,
+    "session": cmd_session,
+    "reseed": cmd_reseed,
     "sync": cmd_sync,
     "plan": cmd_sync,
     "unmatched": cmd_unmatched,

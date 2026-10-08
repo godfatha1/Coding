@@ -10,6 +10,7 @@ now" and "what both had last time".
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -24,6 +25,24 @@ log = logging.getLogger("likesync.engine")
 
 LIKE = "like"
 UNLIKE = "unlike"
+INBOX_REASON = "added to the inbox playlist"
+
+
+@dataclass
+class Inbox:
+    """A playlist used as a one-way intake queue.
+
+    Drop a track into the playlist and it gets liked on that service, after
+    which the ordinary two-way rules govern it. This is deliberately one-way:
+    if playlist membership were treated as part of the mirrored set, a
+    playlist-only track could never be removed -- unliking it elsewhere would
+    propagate a removal that does nothing to the playlist, so the next run
+    would see it present again and re-add it, for ever.
+    """
+
+    provider: str
+    fetch: Callable[[], list[Track]]
+    label: str = "inbox playlist"
 
 
 @dataclass
@@ -38,6 +57,9 @@ class PlannedAction:
     # next run instead of being silently forgotten.
     source_provider: str = ""
     source_id: str = ""
+    # Set for likes taken in from the inbox playlist: only once one of these
+    # has actually landed is the track recorded as taken in.
+    inbox: bool = False
 
     def describe(self) -> str:
         verb = "like" if self.action == LIKE else "unlike"
@@ -63,6 +85,7 @@ class RunReport:
     warnings: list[str] = field(default_factory=list)
     new_links: int = 0
     searches: int = 0
+    inbox_taken: int = 0
     # Planned work that did not get applied this run (rails, truncation).
     deferred: list[PlannedAction] = field(default_factory=list)
 
@@ -85,6 +108,7 @@ class RunReport:
             "conflicts": len(self.conflicts),
             "new_links": self.new_links,
             "searches": self.searches,
+            "inbox_taken": self.inbox_taken,
             "dry_run": int(self.dry_run),
         }
 
@@ -97,9 +121,11 @@ class SyncEngine:
         spotify: Provider,
         soundcloud: Provider,
         cfg: SyncConfig,
+        inbox: Inbox | None = None,
     ) -> None:
         self.store = store
         self.cfg = cfg
+        self.inbox = inbox
         self.providers: dict[str, Provider] = {
             SPOTIFY: spotify,
             SOUNDCLOUD: soundcloud,
@@ -240,6 +266,81 @@ class SyncEngine:
         )
         return None
 
+    # -- inbox playlist ----------------------------------------------------
+
+    def _take_inbox(
+        self,
+        report: RunReport,
+        filtered: dict[str, dict[str, Track]],
+        now_ids: dict[str, set[str]],
+    ) -> list[PlannedAction]:
+        """Queue likes for tracks newly added to the inbox playlist.
+
+        Membership is one-way. A track is recorded as taken in only once the
+        like has landed, and removing it from the playlist never un-records it,
+        so tidying the playlist cannot resurrect likes you have since deleted.
+        """
+        if self.inbox is None:
+            return []
+        name = self.inbox.provider
+        if name not in self.providers:
+            return []
+
+        try:
+            tracks = self.inbox.fetch()
+        except Exception as exc:  # noqa: BLE001 - the likes sync still runs
+            report.warnings.append(
+                f"Could not read the {self.inbox.label}: {exc}. "
+                "The rest of the sync ran normally."
+            )
+            log.warning("inbox read failed: %s", exc)
+            return []
+
+        ignored = self.store.ignored(name)
+        limit = self.cfg.skip_longer_than_ms
+        usable = [
+            t
+            for t in tracks
+            if t.id not in ignored
+            and not (limit and t.duration_ms and t.duration_ms > limit)
+        ]
+        seen = self.store.playlist_seen(name)
+        fresh = [t for t in usable if t.id not in seen]
+        report.counts["inbox_total"] = len(tracks)
+        report.counts["inbox_new"] = len(fresh)
+        if not fresh:
+            return []
+
+        self.store.cache_tracks(fresh)
+        already: list[str] = []
+        actions: list[PlannedAction] = []
+        for track in fresh:
+            self._tracks[track.key] = track
+            if track.id in now_ids[name]:
+                # In the playlist and already liked: nothing to do but
+                # remember it so it is not reconsidered every run.
+                already.append(track.id)
+                continue
+            # Count it as present so the diff treats it as an addition and
+            # propagates it to the other service in this same run.
+            filtered[name][track.id] = track
+            now_ids[name].add(track.id)
+            actions.append(
+                PlannedAction(
+                    provider=name,
+                    track_id=track.id,
+                    action=LIKE,
+                    reason=INBOX_REASON,
+                    label=track.display(),
+                    source_provider=name,
+                    source_id=track.id,
+                    inbox=True,
+                )
+            )
+        if already:
+            self.store.mark_playlist_seen(name, already)
+        return actions
+
     # -- the run -----------------------------------------------------------
 
     def run(self, *, dry_run: bool = False) -> RunReport:
@@ -311,6 +412,12 @@ class SyncEngine:
                     "--force-shrink; otherwise check the API/account first."
                 )
 
+        # --- phase 2b: take in the inbox playlist ------------------------
+        # Runs after the shrinkage guard, which must see the real liked count,
+        # and before the diff, so anything taken in counts as an addition and
+        # propagates to the other service in this same run.
+        inbox_plan = self._take_inbox(report, filtered, now_ids)
+
         added: dict[str, set[str]] = {}
         removed: dict[str, set[str]] = {}
         for name in self.providers:
@@ -337,7 +444,7 @@ class SyncEngine:
         # --- phase 3: resolve links --------------------------------------
         # Fresh additions first, then the backlog of never-matched tracks, so a
         # tight search budget is spent on what changed today.
-        plan: list[PlannedAction] = []
+        plan: list[PlannedAction] = list(inbox_plan)
         consider: dict[str, list[str]] = {name: [] for name in self.providers}
         for name in self.providers:
             fresh = [i for i in added[name] if i in filtered[name]]
@@ -471,6 +578,13 @@ class SyncEngine:
             report.warnings.append("Dry run: nothing was written.")
             return
         self._apply(report)
+
+        # Record inbox tracks only once their like has actually landed, so a
+        # failure is retried on the next run rather than quietly dropped.
+        taken = [a.track_id for a in report.applied if a.inbox]
+        if taken and self.inbox is not None:
+            self.store.mark_playlist_seen(self.inbox.provider, taken)
+            report.inbox_taken = len(taken)
 
         # --- phase 6: record the new baseline ----------------------------
         # The baseline may only advance past a change whose propagation

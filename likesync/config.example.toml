@@ -1,37 +1,89 @@
 # likesync configuration.
 #
 # Copy to ~/.local/share/likesync/config.toml (or ./likesync.toml, or point at
-# it with --config / LIKESYNC_CONFIG). Every value below is optional except the
-# client credentials, and every key can also be set from the environment as
-# LIKESYNC_<SECTION>_<KEY>, e.g. LIKESYNC_SPOTIFY_CLIENT_ID.
+# it with --config / LIKESYNC_CONFIG). Any key can also be set from the
+# environment as LIKESYNC_<SECTION>_<KEY>, e.g. LIKESYNC_SPOTIFY_CLIENT_ID.
 
-# Where state.sqlite3 and tokens.json live.
+# Where state.sqlite3, tokens.json and the browser session live.
 # home = "~/.local/share/likesync"
 
+
+# ---------------------------------------------------------------------------
+# Spotify  -- uses the official API
+# ---------------------------------------------------------------------------
+# You do NOT need Spotify Premium yourself. A development-mode app requires
+# Premium on the account that *owns the app*, and allows up to 5 allow-listed
+# users who do not. So anyone you know with Premium can create the app once,
+# add your account to its allow-list, and send you the client id below. It
+# costs them nothing and needs no further involvement.
 [spotify]
-client_id = "PUT_YOUR_SPOTIFY_CLIENT_ID_HERE"
-# Leave client_secret empty to use PKCE, which is what you want for a personal
-# app. Only set it if you registered a confidential app.
+client_id = "PUT_THE_SPOTIFY_CLIENT_ID_HERE"
+
+# Leave client_secret empty to use PKCE, which is what you want. Only set it if
+# the app was registered as a confidential app.
 # client_secret = ""
-# Must match the redirect URI registered in your Spotify app *exactly*.
-# Spotify requires the loopback IP, not "localhost".
+
+# Must match the redirect URI registered in the Spotify app *exactly*.
+# Spotify requires the loopback IP; "localhost" is rejected.
 redirect_uri = "http://127.0.0.1:8765/callback"
-# "auto" probes PUT /me/library (current) and falls back to PUT /me/tracks
-# (pre-February-2026). Pin it to "library" or "tracks" to skip the probe.
+
+# "auto" tries PUT /me/library (current) and falls back to PUT /me/tracks
+# (pre-February-2026). Pin to "library" or "tracks" to skip the probe.
 # write_mode = "auto"
 
+
+# ---------------------------------------------------------------------------
+# SoundCloud
+# ---------------------------------------------------------------------------
 [soundcloud]
-client_id = "PUT_YOUR_SOUNDCLOUD_CLIENT_ID_HERE"
-# SoundCloud treats every client as confidential, so the secret is required
-# even though we use PKCE.
-client_secret = "PUT_YOUR_SOUNDCLOUD_CLIENT_SECRET_HERE"
-redirect_uri = "http://127.0.0.1:8765/callback"
-# SoundCloud documents the "OAuth" authorization scheme rather than "Bearer".
-# If you get a 401 with a token you know is good, try "Bearer".
-# auth_scheme = "OAuth"
-# "auto" probes POST /likes/tracks/{id} then PUT /me/favorites/{id}.
+# "web"  -- drives soundcloud.com in a browser you signed in to yourself.
+#           No API credentials. This is the default because SoundCloud has not
+#           been granting new API applications. Read the "SoundCloud web mode"
+#           section of the README before using it: automated access is contrary
+#           to their terms, and page changes can break it.
+# "api"  -- the official API. Better in every way, if you have approved
+#           credentials. Fill in client_id and client_secret below.
+mode = "web"
+
+# --- web mode --------------------------------------------------------------
+
+# Optional intake playlist. Drop a track into this SoundCloud playlist and the
+# next run likes it on SoundCloud and mirrors it to Spotify. Deliberately
+# one-way: taking a track out of the playlist does nothing, and a track already
+# taken in is never reconsidered, so tidying the playlist can never resurrect
+# likes you have since deleted.
+# playlist_url = "https://soundcloud.com/your-name/sets/sync-me"
+
+# Path to a Chromium or Chrome binary. Empty means auto-detect.
+# browser_executable = ""
+
+# Run the browser invisibly. Sign-in always opens a visible window regardless.
+headless = true
+
+# Your likes page loads by infinite scroll. This is the cap on scroll rounds;
+# roughly 1 round per 20 tracks, so 400 covers about 8000 likes. A run that
+# hits the cap FAILS rather than syncing a partial library.
+max_scrolls = 400
+
+# How long to wait for each scroll to load. Raise it on a slow connection.
+settle_ms = 450
+
+# Pause between write actions, in seconds. Slow on purpose: this is a daily
+# background job, and there is no reason for it to look like a crawler.
+write_pause_s = 1.5
+
+# --- api mode (ignored when mode = "web") ----------------------------------
+# client_id = ""
+# client_secret = ""      # required even with PKCE: SoundCloud treats every
+#                         # client as confidential
+# redirect_uri = "http://127.0.0.1:8765/callback"
+# auth_scheme = "OAuth"   # their docs use OAuth, not Bearer
 # write_mode = "auto"
 
+
+# ---------------------------------------------------------------------------
+# Sync behaviour
+# ---------------------------------------------------------------------------
 [sync]
 # both | to-spotify | to-soundcloud
 direction = "both"
@@ -40,7 +92,7 @@ direction = "both"
 # sync. Set false if you only ever want likes to propagate.
 propagate_unlikes = true
 
-# Matching confidence. At or above accept_threshold the pair is linked
+# Matching confidence. At or above accept_threshold a pair is linked
 # automatically; between review_threshold and accept_threshold it is parked for
 # you to confirm with `likesync link`; below that it is reported as unmatched.
 # Raise accept_threshold if you see a bad match; lower it if too little links.
@@ -51,19 +103,20 @@ review_threshold = 0.62
 duration_tolerance_ms = 10000
 
 # --- safety rails ---------------------------------------------------------
-# These exist because a bad match or a truncated API read could otherwise
-# delete a library. Leave them on unless you know why you are changing them.
+# These exist because a bad match or a truncated read could otherwise delete a
+# library. Leave them on unless you know why you are changing them.
 
-# Abort the run if a library comes back smaller than this fraction of what it
-# was last run. A truncated API response is indistinguishable from a mass
-# unlike, and this is what stops us acting on one.
+# Abort the run if a library comes back smaller than this fraction of last
+# run's size. A truncated read is indistinguishable from a mass unlike, and
+# this is what stops likesync acting on one.
 min_library_ratio = 0.5
 
 # If a run plans more unlikes than this, skip all of them and warn. They are
-# retried on the next run, so raising the limit later still applies them.
+# held back rather than dropped, so raising the limit later still applies them.
 max_unlikes_per_run = 50
 
-# Cap total writes and searches per run to stay inside API rate limits.
+# Caps per run, to stay well inside rate limits. In web mode each write is a
+# page load plus a click, so keep max_writes_per_run modest.
 max_writes_per_run = 300
 max_searches_per_run = 400
 
@@ -71,14 +124,15 @@ max_searches_per_run = 400
 # appear over time, so unmatched tracks are retried rather than given up on.
 retry_unmatched_after_days = 14
 
-# What to do when the same track was liked on one side and unliked on the
-# other since the last run. "like_wins" keeps it; "skip" leaves both as they
-# are and reports it.
+# What to do when the same track was liked on one side and unliked on the other
+# since the last run. "like_wins" keeps it; "skip" leaves both and reports it.
 conflict = "like_wins"
 
-# Skip anything longer than this (0 disables). Useful for keeping hour-long DJ
-# sets and podcasts out of the matcher. 900000 = 15 minutes.
-# skip_longer_than_ms = 0
+# Skip anything longer than this (0 disables). Worth setting in web mode: hour
+# long DJ sets have no Spotify counterpart and only add noise.
+# 900000 = 15 minutes.
+skip_longer_than_ms = 900000
+
 
 [http]
 timeout = 30

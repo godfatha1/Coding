@@ -14,9 +14,12 @@ license = { text = "MIT" }
 dependencies = []
 
 [project.optional-dependencies]
-# Only needed to encrypt the token file at rest (CI / shared hosts).
+# SoundCloud web mode: drives soundcloud.com in a real browser, because
+# SoundCloud no longer issues API credentials. Not needed in "api" mode.
+web = ["playwright>=1.44"]
+# Encrypts the token and session files at rest (CI and shared hosts).
 crypt = ["cryptography>=42"]
-dev = ["pytest>=8", "pytest-cov>=5"]
+dev = ["pytest>=8", "pytest-cov>=5", "playwright>=1.44"]
 
 [project.scripts]
 likesync = "likesync.cli:main"

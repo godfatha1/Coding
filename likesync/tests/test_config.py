@@ -60,11 +60,28 @@ def test_missing_file_is_an_error_when_named_explicitly(tmp_path):
         load_config(tmp_path / "nope.toml")
 
 
-def test_validate_requires_credentials(tmp_path):
+def test_validate_requires_spotify_credentials(tmp_path):
     cfg = load_config(write(tmp_path, ""))
     with pytest.raises(ConfigError, match="spotify.client_id"):
         cfg.validate()
+
+
+def test_api_mode_requires_soundcloud_credentials(tmp_path):
+    cfg = load_config(write(tmp_path, '[soundcloud]\nmode = "api"\n'))
     with pytest.raises(ConfigError, match="LIKESYNC_SOUNDCLOUD_CLIENT_SECRET"):
+        cfg.validate()
+
+
+def test_web_mode_needs_no_soundcloud_credentials(tmp_path):
+    """Web mode signs in through a browser, so there is nothing to configure."""
+    cfg = load_config(write(tmp_path, '[spotify]\nclient_id = "x"\n'))
+    assert cfg.soundcloud.mode == "web"
+    cfg.validate()
+
+
+def test_bad_soundcloud_mode_is_rejected(tmp_path):
+    cfg = load_config(write(tmp_path, '[soundcloud]\nmode = "telepathy"\n'))
+    with pytest.raises(ConfigError, match="soundcloud.mode invalid"):
         cfg.validate()
 
 
@@ -78,6 +95,7 @@ def test_validate_rejects_a_bad_direction(tmp_path):
 [spotify]
 client_id = "x"
 [soundcloud]
+mode = "api"
 client_id = "y"
 client_secret = "z"
 [sync]
@@ -92,6 +110,7 @@ def test_validate_rejects_inverted_thresholds(tmp_path):
 [spotify]
 client_id = "x"
 [soundcloud]
+mode = "api"
 client_id = "y"
 client_secret = "z"
 [sync]

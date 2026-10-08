@@ -4,15 +4,20 @@ Keeps your **Spotify Liked Songs** and **SoundCloud Likes** in sync, both
 directions, once a day.
 
 Like something on either service and it shows up on the other. Unlike it on
-either and it goes away on both. It runs unattended from cron, a systemd timer,
-Docker, or GitHub Actions, and it is built to fail safe: a bad match or a
-truncated API response should never wipe a library.
+either and it goes from both. Runs unattended from cron, a systemd timer,
+Docker or GitHub Actions, and is built to fail safe: a bad match or a truncated
+read should never wipe a library.
 
-- [Read this before you start](#read-this-before-you-start)
+**You do not need Spotify Premium and you do not need SoundCloud API approval.**
+How that works, and what it costs you, is the next two sections.
+
+- [What you need](#what-you-need)
+- [SoundCloud web mode: read this](#soundcloud-web-mode-read-this)
 - [How it works](#how-it-works)
 - [Install](#install)
-- [Register the two apps](#register-the-two-apps)
-- [Connect your accounts](#connect-your-accounts)
+- [Set up Spotify](#set-up-spotify)
+- [Set up SoundCloud](#set-up-soundcloud)
+- [The inbox playlist](#the-inbox-playlist)
 - [First run](#first-run)
 - [Schedule it](#schedule-it)
 - [Everyday commands](#everyday-commands)
@@ -24,39 +29,58 @@ truncated API response should never wipe a library.
 
 ---
 
-## Read this before you start
+## What you need
 
-Two things are outside this tool's control and will decide whether you can run
-it at all. Please check both before investing time.
+| | |
+| --- | --- |
+| **Spotify Premium** | Not yours. A development-mode Spotify app needs Premium on the account that **owns the app**, and allows up to 5 allow-listed users who do **not** need it. So anyone you know with Premium creates the app once and allow-lists you. Two minutes of their time, no money, no further involvement. |
+| **SoundCloud API approval** | Not needed. SoundCloud stopped granting API applications years ago, so likesync drives soundcloud.com in a browser you sign in to yourself. See the warning below. |
+| **A machine to run it on** | Anything always-ish on: a laptop, a Pi, a small VPS. SoundCloud web mode needs a browser, so a one-time graphical sign-in is required somewhere — you can then copy the session to a headless box. |
+| **Python** | 3.11 or newer. |
 
-**1. SoundCloud API access is gated.** SoundCloud stopped self-serve API
-registration years ago. Access is now granted case by case on request, some
-sources report it requires an Artist Pro account, and the public API terms
-generally exclude commercial use. Personal library sync is the kind of
-non-commercial use that fits, but **approval is not guaranteed and can take
-weeks**. Start at <https://developers.soundcloud.com> and check the current
-process. If you already have a client id and secret, you are fine.
+One ongoing chore: **Spotify refresh tokens expire about six months after you
+first authorise**, so roughly twice a year a run fails and you re-run
+`likesync login spotify`. `likesync status` warns as the date approaches.
 
-**2. Spotify's developer mode has conditions.** An app in Development Mode
-requires the app owner's account to have **Spotify Premium** — if the
-subscription lapses, API calls stop. Dev-mode apps are limited to a handful of
-allow-listed users, which is plenty for syncing your own library. You add your
-own account to the allow-list in the app's dashboard settings.
+## SoundCloud web mode: read this
 
-**3. You will need to re-authorise Spotify about twice a year.** Since July
-2026, Spotify refresh tokens expire roughly six months after you first grant
-consent. When that happens the run fails with `invalid_grant` and you re-run
-`likesync login spotify`. `likesync status` warns you as the date approaches.
+Because SoundCloud will not issue credentials, likesync does on your behalf
+what you would do by hand: it opens your likes page in a real browser, reads
+what is on it, and clicks the like button on a track page.
 
-This tool talks only to the official, documented APIs. It does not scrape, and
-it does not use SoundCloud's internal `api-v2` endpoints.
+What that means, stated plainly:
+
+- **It is contrary to SoundCloud's terms of service**, which prohibit
+  automated access. It is your own account, your own library, nobody else's
+  data, and the request rate is far below ordinary human browsing — but the
+  decision is yours, and account action is a real if unlikely risk.
+- **It can break.** Page markup is not a published interface. The extractor is
+  written as layered selectors with a structural fallback, and if SoundCloud
+  renames every CSS class it still works by finding the track link and the
+  uploader link inside each row. But a big enough redesign will need a fix.
+  `likesync probe soundcloud` tells you in one command whether it can still
+  read the page.
+- **What it never does**: it does not handle your password (you sign in
+  yourself), and it does not read, extract or transmit any token or key. The
+  only thing stored is the ordinary browser profile that keeps you signed in
+  between runs, kept locally at mode `0600` and encrypted if you set
+  `LIKESYNC_SECRET_KEY`.
+- **It is slow on purpose.** Reads are one page load; each write is a page load
+  plus a click, spaced `write_pause_s` apart. A daily sync of a handful of
+  changes takes seconds to a couple of minutes.
+
+If you would rather not: set `soundcloud.mode = "api"` and the credentialed
+path is fully implemented and tested, waiting for the day approval arrives.
+Alternatively **Soundiiz** and **TuneMyMusic** do automated SoundCloud↔Spotify
+sync with proper API access for a few pounds a month, with nothing to maintain.
+That is a perfectly good answer and cheaper than Premium.
 
 ## How it works
 
-Two-way sync needs memory. If Spotify has a track and SoundCloud does not, that
-is either *an addition on Spotify* or *a removal on SoundCloud* — and nothing
-in the current state of the two libraries can tell you which. So every run
-compares three things:
+Two-way sync needs memory. If Spotify has a track and SoundCloud does not,
+that is either *an addition on Spotify* or *a removal on SoundCloud* — and
+nothing in the current state of the two libraries can tell you which. So every
+run compares three things:
 
 ```
    what Spotify has now  ─┐
@@ -68,91 +92,123 @@ compares three things:
 The previous run's snapshot lives in a local SQLite file, along with the track
 pairings it has worked out. A run then:
 
-1. Reads both libraries in full (and aborts rather than acting on a partial read).
-2. Diffs each against the snapshot to get real additions and removals.
-3. For anything new, finds its counterpart on the other service — by ISRC when
+1. Reads both libraries in full, and aborts rather than acting on a partial read.
+2. Takes in anything new in the [inbox playlist](#the-inbox-playlist).
+3. Diffs each library against the snapshot to get real additions and removals.
+4. For anything new, finds its counterpart on the other service — by ISRC when
    both sides publish one, otherwise by searching and scoring the results.
-4. Builds a plan, checks it against the safety rails, and applies it.
-5. Records the new snapshot — but only for changes that actually propagated, so
-   a failed write is retried tomorrow instead of being silently forgotten.
+5. Builds a plan, checks it against the [safety rails](#safety-rails), applies it.
+6. Records the new snapshot — but only for changes that actually propagated, so
+   a failed write is retried tomorrow instead of silently forgotten.
 
-**The first run is a merge, not a sync.** With no snapshot, everything looks
+**The first run is a merge, not a sync.** With no snapshot everything looks
 new, so both libraries end up with the union of the two. Nothing is ever
-unliked on a first run. Use `likesync plan` first to see exactly what it would
-do.
+unliked on a first run. Use `likesync plan` first to see exactly what it would do.
 
 ## Install
-
-Python 3.11 or newer. No runtime dependencies — this runs from cron for years,
-and a dependency resolution failure at 04:00 is worse than a bit more code.
 
 ```bash
 git clone https://github.com/godfatha1/coding.git
 cd coding/likesync
 python3 -m venv venv
-./venv/bin/pip install .
-
-# optional: encrypt the stored tokens at rest (needed for the CI workflow)
-./venv/bin/pip install '.[crypt]'
+./venv/bin/pip install '.[web,crypt]'
+./venv/bin/python -m playwright install chromium
 ```
+
+`[web]` pulls in Playwright for SoundCloud web mode; `[crypt]` encrypts the
+stored session and tokens at rest. In `api` mode likesync has **no runtime
+dependencies at all** — plain `pip install .` is enough.
 
 Then `./venv/bin/likesync --help`, or put the venv's `bin` on your `PATH`.
 
-## Register the two apps
+## Set up Spotify
 
-### Spotify
+**Ask someone with Spotify Premium to do steps 1–4.** It costs them nothing and
+they never have to think about it again.
 
 1. Go to <https://developer.spotify.com/dashboard> and create an app.
 2. Set the redirect URI to exactly `http://127.0.0.1:8765/callback`.
    Spotify requires the loopback **IP**; `localhost` is rejected.
 3. Request the scopes `user-library-read` and `user-library-modify`.
-4. Under the app's settings, add your own Spotify account as a user.
-5. Copy the **Client ID**. You do not need the client secret — likesync uses
-   PKCE, which is the right choice for a personal app.
-
-### SoundCloud
-
-1. Request API access at <https://developers.soundcloud.com> (see the warning
-   above).
-2. Set the redirect URI to `http://127.0.0.1:8765/callback`.
-3. Copy the **Client ID** and **Client Secret**. SoundCloud treats every client
-   as confidential, so the secret is required even though we use PKCE.
-
-### Configure
-
-```bash
-cp config.example.toml ~/.local/share/likesync/config.toml
-# or keep it next to the code as ./likesync.toml
-$EDITOR ~/.local/share/likesync/config.toml
-```
-
-Fill in `spotify.client_id`, `soundcloud.client_id` and
-`soundcloud.client_secret`. Everything else has a working default, and
-`config.example.toml` documents each setting. Any value can also come from the
-environment as `LIKESYNC_<SECTION>_<KEY>`, e.g. `LIKESYNC_SPOTIFY_CLIENT_ID`,
-which is the easier route for containers and CI.
-
-## Connect your accounts
+4. In the app's settings, under user management, **add your Spotify account**
+   (the email on it). Then send you the **Client ID** — not the secret;
+   likesync uses PKCE and does not want one.
+5. You: put that client id in your config, then
 
 ```bash
 likesync login spotify
-likesync login soundcloud
 ```
 
-Each opens your browser, then catches the redirect on `127.0.0.1:8765`. On a
-headless box, use `--manual`: it prints the URL, you approve it in any browser,
-and paste the resulting address back.
+That opens your browser, you approve it on your own free account, and the
+tokens land in `~/.local/share/likesync/tokens.json` at mode `0600`.
+
+## Set up SoundCloud
 
 ```bash
-likesync login spotify --manual
+cp config.example.toml ~/.local/share/likesync/config.toml
+$EDITOR ~/.local/share/likesync/config.toml   # paste the Spotify client id
+likesync login soundcloud --web
 ```
 
-Tokens are written to `~/.local/share/likesync/tokens.json`, mode `0600`.
-Set `LIKESYNC_SECRET_KEY` (32 random bytes, base64) to encrypt that file with
-AES-GCM instead:
+A browser window opens on soundcloud.com. Sign in exactly as you normally
+would, including Google or Apple sign-in. The window closes itself once it sees
+you are signed in, and the browser profile is saved. Then check it:
 
 ```bash
-python3 -c 'import os,base64;print(base64.urlsafe_b64encode(os.urandom(32)).decode())'
+likesync probe soundcloud
+```
+
+That is read-only. It confirms you are signed in, reads the first screen of
+your likes page, and reports how many tracks it could parse — so you know the
+extractor works before any syncing happens. If it reports that the extractor
+needs updating, send that output.
+
+### On a headless server
+
+Sign in on a machine with a screen, then move the session across:
+
+```bash
+# on your laptop
+likesync login soundcloud --web
+likesync session export            # prints a base64 blob
+
+# on the server
+export LIKESYNC_SESSION='<the blob>'
+likesync session import
+likesync probe soundcloud
+```
+
+That blob is a live sign-in to your SoundCloud account. Treat it like a
+password, and set `LIKESYNC_SECRET_KEY` on the server so it is encrypted at
+rest.
+
+## The inbox playlist
+
+Optional, and worth it. Make a SoundCloud playlist, put its URL in
+`soundcloud.playlist_url`, and it becomes an intake queue: **drop a track in
+and the next run likes it on SoundCloud and mirrors it to Spotify.**
+
+Useful because your likes are probably full of things that will never exist on
+Spotify — bootlegs, unreleased edits, DJ mixes — whereas a playlist is explicit
+curation.
+
+It is deliberately **one-way**:
+
+- Adding a track to the playlist likes it. From then on the ordinary two-way
+  rules govern it, exactly as if you had liked it yourself.
+- **Removing** a track from the playlist does nothing.
+- A track already taken in is never reconsidered.
+
+That last point is the important one. If playlist membership were treated as
+part of the mirrored set, a playlist-only track could never be deleted: you
+unlike it on Spotify, the removal propagates to SoundCloud, the playlist still
+lists it, and the next run puts it back — for ever. The one-way intake is what
+avoids that, and there is a test named after the scenario.
+
+If you do want the whole playlist taken in again:
+
+```bash
+likesync reseed      # warns you first: this re-likes tracks you may have removed
 ```
 
 ## First run
@@ -163,8 +219,8 @@ Always look before you leap:
 likesync plan
 ```
 
-That reads both libraries, works out the pairings, and prints exactly what it
-would change — without writing anything. Typical first output:
+That reads both libraries, works out the pairings and prints exactly what it
+would change, writing nothing:
 
 ```
 likesync run #1 (dry run) (first run — baseline merge)
@@ -198,7 +254,7 @@ If you do not like the result, `likesync undo` reverses the whole run.
 
 ## Schedule it
 
-Pick whichever fits. All of them just run `likesync sync` once a day.
+All of these just run `likesync sync` once a day.
 
 ### systemd (recommended on Linux)
 
@@ -210,86 +266,64 @@ systemctl list-timers likesync.timer                # confirm the next run
 journalctl -u likesync.service -n 50                # read the last run
 ```
 
-The timer uses `Persistent=true`, so a machine that was asleep at the scheduled
-time catches up on wake, and a randomised delay keeps you off the hour.
+`Persistent=true` means a machine asleep at the scheduled time catches up on
+wake, and a randomised delay keeps you off the hour.
 
 ### cron
 
 See `deploy/crontab.example`. cron runs with almost no environment, so set
-`LIKESYNC_HOME` and the credentials explicitly and use absolute paths.
+`LIKESYNC_HOME` explicitly and use absolute paths.
 
 ### macOS
 
-See `deploy/com.likesync.daily.plist`; copy it to `~/Library/LaunchAgents/` and
-`launchctl load` it.
+See `deploy/com.likesync.daily.plist`; copy it to `~/Library/LaunchAgents/`
+and `launchctl load` it.
 
 ### Docker
+
+The image bundles Chromium for web mode.
 
 ```bash
 docker build -t likesync ./likesync
 docker run --rm -v likesync-data:/data \
   -e LIKESYNC_SPOTIFY_CLIENT_ID=... \
-  -e LIKESYNC_SOUNDCLOUD_CLIENT_ID=... \
-  -e LIKESYNC_SOUNDCLOUD_CLIENT_SECRET=... \
   likesync sync
 ```
 
-Log in once with `docker run -it --rm -v likesync-data:/data ... likesync login
-spotify --manual` so the tokens land on the volume.
+Sign in on your laptop and `likesync session import` into the volume, since the
+container has no display.
 
 ### GitHub Actions
 
 `.github/workflows/likesync.yml` runs it daily with no machine of your own.
-
-**Understand the trade-off first.** Tokens have to survive between runs, and
-SoundCloud rotates its refresh token on every refresh, so the workflow commits
-the token file to a `likesync-state` branch of this repository. It is encrypted
-with AES-GCM under `LIKESYNC_SECRET_KEY`, and the job refuses to run if that
-key is missing or if the file is not encrypted. Even so, **if this repository
-is public, that encrypted blob is publicly readable**. For a public repo,
-prefer running it on your own machine, or move the workflow to a private repo.
-
-Set these repository secrets:
-
-| Secret | What it is |
-| --- | --- |
-| `LIKESYNC_SPOTIFY_CLIENT_ID` | from the Spotify dashboard |
-| `LIKESYNC_SOUNDCLOUD_CLIENT_ID` | from SoundCloud |
-| `LIKESYNC_SOUNDCLOUD_CLIENT_SECRET` | from SoundCloud |
-| `LIKESYNC_SECRET_KEY` | 32 random bytes, base64 — required |
-| `LIKESYNC_TOKENS` | `likesync tokens export` output, first run only |
-
-Log in locally first, then:
-
-```bash
-likesync tokens export        # paste into the LIKESYNC_TOKENS secret
-```
-
-After the first successful run the encrypted file on the state branch takes
-over and you can delete the `LIKESYNC_TOKENS` secret. Each run writes a summary
-to the job page and uploads the full JSON report as an artifact. Trigger it by
-hand from the Actions tab, with a dry-run checkbox, whenever you want.
+Note the trade-off documented in the workflow: tokens and the browser session
+have to survive between runs, so it commits them — AES-GCM encrypted under
+`LIKESYNC_SECRET_KEY`, and the job refuses to run without that key. **If this
+repository is public, that encrypted blob is publicly readable.** For a public
+repo, prefer your own machine or a private repo.
 
 ## Everyday commands
 
 ```bash
-likesync status            # connections, library sizes, last run
+likesync status            # connections, library sizes, inbox, last run
+likesync probe soundcloud  # read-only: is the session good, can it read the page
 likesync plan              # what a sync would do, writing nothing
 likesync sync              # do it
 likesync sync -v           # ... and show the reasoning per track
 likesync sync --json       # machine-readable report
 likesync runs              # recent run history
 
-likesync unmatched         # tracks with no counterpart found
-likesync unmatched --review  # near-misses waiting on your call
+likesync unmatched            # tracks with no counterpart found
+likesync unmatched --review   # near-misses waiting on your call
 likesync link soundcloud 5512 3aBc9   # confirm a pairing by hand
 likesync unlink spotify 3aBc9         # forget a wrong pairing
 
 likesync ignore soundcloud 912 --reason "90 minute DJ set"
 likesync unignore soundcloud 912
 
+likesync reseed            # take the whole inbox playlist in again
+likesync session export    # move the SoundCloud sign-in to another machine
 likesync undo              # reverse the last run
-likesync undo --run 7      # reverse a specific run
 ```
 
 Useful flags on `sync`:
@@ -310,11 +344,11 @@ retry tomorrow), `4` a safety rail aborted the run.
 
 Spotify gives you clean artist and title fields. SoundCloud gives you
 `"Fred again.. - Delilah (pull me out of this) [Skrillex Remix] [FREE
-DOWNLOAD]"` uploaded by a promo channel. Bridging that is the hard part.
+DOWNLOAD]"` posted by a promo channel. Bridging that is the hard part.
 
 **ISRC first.** When both sides publish an ISRC, an exact match is accepted
-immediately. SoundCloud exposes one in `publisher_metadata` for properly
-distributed tracks, which covers most label releases.
+immediately. (Web mode cannot see ISRCs — the page does not show them — so this
+only applies in `api` mode.)
 
 **Otherwise, parse and score.** Titles are decomposed into:
 
@@ -322,148 +356,158 @@ distributed tracks, which covers most label releases.
   DOWNLOAD]`, `HQ`, `Out Now`, `Premiere`, `2016 Remaster`, `Original Mix`, …)
 - credited names, including `feat.` artists pulled out of the title
 - the artist, parsed from `"Artist - Title"` when the uploader is just a label
-- **version markers**, which are the thing that matters most
+- **version markers**, which matter most
 
-The score weighs title similarity, artist similarity and duration. But the
-score alone never decides — these **vetoes** come first, and any one of them
-rejects a pair outright no matter how well it scores:
+The score weighs title, artist and duration similarity. But the score alone
+never decides — these **vetoes** come first, and any one of them rejects a pair
+outright however well it scores:
 
 - **Version mismatch.** A remix never matches the original. Nor does a
   bootleg, flip, VIP, dub, mashup, cover, live take, acoustic, instrumental,
   karaoke, demo or nightcore edit.
 - **Different remixer.** A Skrillex remix never matches a Noisia remix.
-- **Duration too far apart.** Beyond roughly 15 seconds (scaling with track
-  length, capped at 45), it is a different recording — this is what keeps
-  hour-long DJ sets from matching the track they are named after.
+- **Duration too far apart.** Beyond roughly 15 seconds (scaling with length,
+  capped at 45), it is a different recording — this is what stops hour-long DJ
+  sets matching the track they are named after.
 - **Artist or title too weak** on their own.
 
-Anything at or above `accept_threshold` (0.78) is linked automatically.
-Between `review_threshold` (0.62) and that, it is parked for you to confirm
-with `likesync link` — surfaced by `likesync unmatched --review`. Below that it
-is reported as unmatched and retried every couple of weeks, since the track may
-simply not be uploaded yet.
+At or above `accept_threshold` (0.78) a pair is linked automatically. Between
+`review_threshold` (0.62) and that it is parked for you to confirm with
+`likesync link`. Below, it is reported unmatched and retried every couple of
+weeks, since the track may simply not be uploaded yet.
 
-Pairings are remembered, so this work happens once per track, not daily. If you
-ever see a wrong pairing, `likesync unlink` it and `likesync link` the right
-one; manual links are never overwritten by the matcher.
+Pairings are remembered, so this happens once per track, not daily. If you see
+a wrong pairing, `likesync unlink` it and `likesync link` the right one; manual
+links are never overwritten by the matcher.
 
 ## Safety rails
 
 Delete propagation is the dangerous half of two-way sync, so it is fenced in.
 
-- **Library shrinkage abort.** If a library comes back with less than half of
-  what it had last run, the run aborts and writes nothing. A truncated API read
-  is indistinguishable from a mass unlike, and this is what stops likesync
-  acting on one. Override with `--force-shrink` once you have checked.
+- **Library shrinkage abort.** If a library comes back with under half of what
+  it had last run, the run aborts and writes nothing. A truncated read is
+  indistinguishable from a mass unlike. Override with `--force-shrink` once
+  you have checked.
+- **Incomplete reads fail loudly.** In web mode, if the likes page is still
+  loading more when the scroll cap is hit, the run errors instead of treating
+  the half-loaded list as your library.
 - **Unlike cap.** More than `max_unlikes_per_run` (50) planned removals and all
-  of them are skipped with a warning rather than applied. They are *deferred*,
+  of them are skipped with a warning rather than applied. They are *held back*,
   not dropped: raise the limit or pass `--force-unlikes` and the next run
   applies them.
-- **No unlikes on the first run.** There is no baseline to diff against, so
-  removals are not even representable.
+- **No unlikes on the first run.** There is no baseline to diff against.
 - **The snapshot only advances past changes that landed.** A failed write, a
-  deferred unlike or a truncated plan leaves that track's baseline untouched,
-  so the next run sees the same change again and retries it. Without this, one
-  failed write would diverge the two libraries permanently.
+  held-back unlike or a truncated plan leaves that track's baseline untouched,
+  so the next run sees the change again and retries. Without this, one failed
+  write would diverge the two libraries permanently.
+- **Writes verify themselves.** In web mode a like is read back off the button
+  before it counts as done, and liking something already liked is a no-op
+  rather than a toggle.
 - **Per-track failures are isolated.** One unlikeable track does not abort the
   run, and a rejected Spotify batch is retried one id at a time to find the
   culprit.
 - **`likesync undo`** reverses any run, then re-reads both libraries so the
   next run starts from the truth.
-- **Write and search budgets** keep a single run inside both services' rate
-  limits; anything left over is picked up tomorrow.
+- **Write and search budgets** keep a run inside both services' limits.
 
 Every run is recorded — the plan, what was applied, what failed and why — in
 `state.sqlite3`, readable with `likesync runs` and `likesync sync --json`.
 
 ## Limitations
 
-Worth knowing before you rely on it:
-
 - **Liked/saved tracks only.** Playlists, albums and followed artists are out
-  of scope.
-- **Lots of SoundCloud has no Spotify counterpart.** Bootlegs, unreleased
-  edits, DJ mixes and self-released demos simply do not exist on Spotify. They
-  show up in `likesync unmatched` permanently, and that is the correct answer.
-  Set `skip_longer_than_ms` to keep long mixes out of the matcher entirely.
-- **SoundCloud does not expose when you liked something.** So a genuine
-  conflict — the same track liked on one side and unliked on the other since
-  the last run — cannot be resolved by recency. The default `like_wins` keeps
-  the track and reports the conflict; `conflict = "skip"` leaves both sides
-  alone.
-- **A newly discovered pairing is treated as an addition.** If a track sat
+  of scope (the inbox playlist is an input, not a sync target).
+- **Much of SoundCloud has no Spotify counterpart.** Bootlegs, unreleased
+  edits, DJ mixes and self-released demos simply do not exist there. They stay
+  in `likesync unmatched` permanently, and that is the correct answer. Set
+  `skip_longer_than_ms` to keep long mixes out of the matcher.
+- **Web mode has no ISRC**, so matching leans entirely on title, artist and
+  duration. It is the same matcher, just without the shortcut.
+- **SoundCloud does not expose when you liked something.** A genuine conflict —
+  the same track liked on one side and unliked on the other since the last run
+  — cannot be resolved by recency. The default `like_wins` keeps the track and
+  reports the conflict.
+- **A newly discovered pairing counts as an addition.** If a track sat
   unmatched on Spotify for a month and then appears on SoundCloud, likesync
-  links them and likes it on SoundCloud. It has no record of a counterpart
-  having existed before, so it cannot tell that apart from a new like.
-- **Spotify local files cannot sync.** They have no API id. They are skipped.
-- **Region-blocked or deleted tracks** may fail to like; they are reported as
-  failures and retried.
-- **One account pair per state file.** Use separate `LIKESYNC_HOME` directories
-  for separate pairs.
+  links them and likes it. It has no record of a counterpart existing before,
+  so it cannot tell that from a new like.
+- **Switching modes needs re-linking.** `api` mode identifies tracks by URN
+  (`soundcloud:tracks:12345`), web mode by permalink
+  (`soundcloud:permalink:burial/archangel`), because the page does not reliably
+  expose numeric ids. A state file written in one mode cannot address tracks in
+  the other; it will say so clearly rather than misbehaving. Start fresh with a
+  new `LIKESYNC_HOME` if you switch.
+- **Spotify local files cannot sync.** They have no API id, and are skipped.
+- **One account pair per state file.** Use separate `LIKESYNC_HOME`
+  directories for separate pairs.
 
 ## Troubleshooting
 
+**`likesync probe soundcloud` says "not signed in".** The browser profile
+expired, which happens every few months. Re-run `likesync login soundcloud
+--web`.
+
+**Probe says the extractor needs updating.** SoundCloud changed their markup
+enough to defeat both the class selectors and the structural fallback. Send the
+probe output; the fix is contained in one JavaScript block in
+`providers/soundcloud_web.py`.
+
+**The run errors about the scroll limit.** Your likes list is longer than
+`max_scrolls` rounds can load. Raise `soundcloud.max_scrolls`. It fails rather
+than syncing a partial library on purpose.
+
 **`403` on a Spotify like or unlike.** Your client id is subject to the
 February 2026 endpoint changes, which replaced `PUT /me/tracks` with
-`PUT /me/library`. likesync probes both automatically and remembers which works,
-so this usually resolves itself; if it does not, pin
-`spotify.write_mode = "library"`. A 403 can also mean the app owner's Premium
-subscription lapsed.
+`PUT /me/library`. likesync probes both and remembers which works, so this
+usually resolves itself; otherwise pin `spotify.write_mode = "library"`. A 403
+can also mean the **app owner's** Premium lapsed.
 
-**`401` from SoundCloud with a token you just created.** SoundCloud documents
-the `OAuth` authorization scheme rather than `Bearer`. likesync defaults to
-`OAuth`; set `soundcloud.auth_scheme = "Bearer"` if they have changed it.
-
-**`invalid_grant` on refresh.** The refresh token is dead — expected for
-Spotify roughly every six months. Run `likesync login <provider>` again.
-If this happens repeatedly on SoundCloud, something is spending the refresh
-token twice: SoundCloud invalidates it on every use. likesync serialises
-refreshes behind a file lock, so check you are not running two instances
-against the same `LIKESYNC_HOME` (and note the CI workflow sets a
-`concurrency` group for exactly this reason).
-
-**`429` / `QUOTA_EXCEEDED`.** likesync honours `Retry-After` and backs off. A
-`QUOTA_EXCEEDED` response means Spotify's dev-mode quota is spent and retrying
-today will not help; lower `max_searches_per_run` so a run does less work.
+**Spotify says `invalid_grant`.** The refresh token expired — expected roughly
+every six months. Run `likesync login spotify` again.
 
 **A wrong pairing got made.** `likesync unlink <provider> <id>`, then
 `likesync link` the right one, or `likesync ignore` the track. Raise
-`accept_threshold` if it keeps happening.
+`accept_threshold` if it recurs.
 
-**The run aborted on library shrinkage.** That is the rail doing its job.
-Check the library really did shrink (open the app), then re-run with
-`--force-shrink`.
+**The run aborted on library shrinkage.** That is the rail working. Check the
+library really did shrink, then re-run with `--force-shrink`.
 
 ## Development
 
 ```bash
 cd likesync
-python3 -m pip install -e '.[dev]'
-python3 -m pytest              # 121 tests, no network
-python3 -m pytest --cov=likesync
+python3 -m pip install -e '.[dev,crypt]'
+python3 -m pytest              # 177 tests, no network
 ```
 
-The tests run entirely offline. `FakeTransport` scripts HTTP at the transport
-seam, so provider tests assert on real request shapes — paths, query strings,
-batch sizes, fallback order — without touching the network, and the engine
-tests drive full sync scenarios through in-memory providers.
+The tests run entirely offline. Provider tests script HTTP at the transport
+seam and assert on real request shapes — paths, query strings, batch sizes,
+fallback order. The SoundCloud web provider is harder: soundcloud.com is not
+reachable from CI, so its DOM extractor is exercised **against representative
+markup rendered in real Chromium**, including a like button that genuinely
+toggles. That proves the JavaScript works — selectors, structural fallback,
+click-and-verify — not merely the Python around it.
 
 ```
 src/likesync/
-  matching.py    title parsing, version vetoes, scoring   <- read this first
-  engine.py      three-way reconciliation and the rails
-  state.py       SQLite: snapshot, pairings, run log
-  providers/     spotify.py, soundcloud.py  (API quirks live here)
-  oauth.py       PKCE, loopback redirect, refresh under lock
-  tokens.py      token storage, optional AES-GCM at rest
-  httpc.py       stdlib HTTP with retries + the test seam
-  cli.py         commands
+  matching.py           title parsing, version vetoes, scoring  <- read first
+  engine.py             three-way reconciliation, inbox, rails
+  state.py              SQLite: snapshot, pairings, inbox memory, run log
+  providers/
+    spotify.py          official API
+    soundcloud.py       official API (for if approval ever arrives)
+    soundcloud_web.py   the DOM extractor and click-to-like
+  websession.py         signed-in Chromium, persisted profile
+  oauth.py              PKCE, loopback redirect, refresh under lock
+  tokens.py             token storage, optional AES-GCM at rest
+  httpc.py              stdlib HTTP with retries + the test seam
+  cli.py                commands
 ```
 
-Both services change their APIs more often than you would like, so endpoint
-behaviour is probed and remembered rather than hardcoded, and base URLs,
-auth schemes and write modes are all configurable. If something moves, it
-should be a config change rather than a patch.
+Both services change more often than you would like, so endpoint behaviour is
+probed and remembered rather than hardcoded, and base URLs, auth schemes, write
+modes and selectors are all replaceable. If something moves, it should be a
+config change or one patch, not a rewrite.
 
 ## Licence
 

@@ -94,6 +94,17 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL
 );
 
+-- Tracks already taken in from the inbox playlist. Membership is recorded only
+-- once a track has actually been liked, and removing it from the playlist
+-- never un-records it: otherwise re-adding a track you had since unliked, or
+-- simply tidying the playlist, would resurrect likes you had deleted.
+CREATE TABLE IF NOT EXISTS playlist_seen (
+    provider  TEXT NOT NULL,
+    track_id  TEXT NOT NULL,
+    seen_at   TEXT NOT NULL,
+    PRIMARY KEY (provider, track_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_actions_run ON actions(run_id);
 CREATE INDEX IF NOT EXISTS idx_attempts_status ON attempts(status);
 """
@@ -274,6 +285,28 @@ class Store:
         return self.db.execute(
             "SELECT * FROM attempts WHERE status=? ORDER BY last_try DESC", (status,)
         ).fetchall()
+
+    # -- inbox playlist ----------------------------------------------------
+
+    def playlist_seen(self, provider: str) -> set[str]:
+        rows = self.db.execute(
+            "SELECT track_id FROM playlist_seen WHERE provider=?", (provider,)
+        ).fetchall()
+        return {r["track_id"] for r in rows}
+
+    def mark_playlist_seen(self, provider: str, track_ids: Iterable[str]) -> None:
+        with self.transaction() as db:
+            db.executemany(
+                "INSERT OR IGNORE INTO playlist_seen(provider, track_id, seen_at)"
+                " VALUES(?,?,?)",
+                [(provider, tid, utcnow()) for tid in track_ids],
+            )
+
+    def forget_playlist_seen(self, provider: str) -> int:
+        """Clear the inbox memory so the whole playlist is taken in again."""
+        with self.transaction() as db:
+            cur = db.execute("DELETE FROM playlist_seen WHERE provider=?", (provider,))
+        return cur.rowcount
 
     # -- track cache -------------------------------------------------------
 

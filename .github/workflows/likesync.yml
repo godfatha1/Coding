@@ -50,6 +50,8 @@ jobs:
       LIKESYNC_SOUNDCLOUD_CLIENT_SECRET: ${{ secrets.LIKESYNC_SOUNDCLOUD_CLIENT_SECRET }}
       LIKESYNC_SECRET_KEY: ${{ secrets.LIKESYNC_SECRET_KEY }}
       LIKESYNC_TOKENS: ${{ secrets.LIKESYNC_TOKENS }}
+      # SoundCloud web mode: output of `likesync session export`, first run only.
+      LIKESYNC_SESSION: ${{ secrets.LIKESYNC_SESSION }}
 
     steps:
       - uses: actions/checkout@v4
@@ -69,7 +71,10 @@ jobs:
           python-version: "3.12"
 
       - name: Install likesync
-        run: pip install --quiet './likesync[crypt]'
+        run: |
+          pip install --quiet './likesync[web,crypt]'
+          # Only needed for SoundCloud web mode; harmless otherwise.
+          python -m playwright install --with-deps chromium
 
       - name: Restore sync state
         run: |
@@ -78,14 +83,19 @@ jobs:
             # `git show branch:path` pulls files out without a checkout.
             git show "FETCH_HEAD:state.sqlite3" > "$LIKESYNC_HOME/state.sqlite3" \
               2>/dev/null || rm -f "$LIKESYNC_HOME/state.sqlite3"
-            git show "FETCH_HEAD:tokens.json" > "$LIKESYNC_HOME/tokens.json" \
-              2>/dev/null || rm -f "$LIKESYNC_HOME/tokens.json"
-            [ -f "$LIKESYNC_HOME/tokens.json" ] && chmod 600 "$LIKESYNC_HOME/tokens.json"
+            for f in tokens.json soundcloud-session.json; do
+              git show "FETCH_HEAD:$f" > "$LIKESYNC_HOME/$f" \
+                2>/dev/null || rm -f "$LIKESYNC_HOME/$f"
+              [ -f "$LIKESYNC_HOME/$f" ] && chmod 600 "$LIKESYNC_HOME/$f"
+            done
             echo "Restored state from $STATE_BRANCH."
           else
             echo "No $STATE_BRANCH branch yet; this is a first run."
           fi
           # Without a stored token file, fall back to the one-time seed secret.
+          if [ -n "$LIKESYNC_SESSION" ] && [ ! -f "$LIKESYNC_HOME/soundcloud-session.json" ]; then
+            likesync session import
+          fi
           if [ ! -f "$LIKESYNC_HOME/tokens.json" ] && [ -z "$LIKESYNC_TOKENS" ]; then
             echo "::error::No stored tokens and LIKESYNC_TOKENS is empty." \
                  "Run 'likesync login spotify' and 'likesync login soundcloud'" \
@@ -140,12 +150,16 @@ jobs:
           [ -f "$LIKESYNC_HOME/state.sqlite3" ] || exit 0
           TMP="$(mktemp -d)"
           cp "$LIKESYNC_HOME/state.sqlite3" "$TMP/"
-          [ -f "$LIKESYNC_HOME/tokens.json" ] && cp "$LIKESYNC_HOME/tokens.json" "$TMP/"
-          # Refuse to commit a token file that is not encrypted.
-          if [ -f "$TMP/tokens.json" ] && ! grep -q '"enc"' "$TMP/tokens.json"; then
-            echo "::error::tokens.json is not encrypted; refusing to commit it."
-            exit 1
-          fi
+          for f in tokens.json soundcloud-session.json; do
+            [ -f "$LIKESYNC_HOME/$f" ] && cp "$LIKESYNC_HOME/$f" "$TMP/"
+          done
+          # Refuse to commit any credential file that is not encrypted.
+          for f in tokens.json soundcloud-session.json; do
+            if [ -f "$TMP/$f" ] && ! grep -q '"enc"' "$TMP/$f"; then
+              echo "::error::$f is not encrypted; refusing to commit it."
+              exit 1
+            fi
+          done
           cd "$TMP"
           git init -q -b "$STATE_BRANCH"
           git config user.name "github-actions[bot]"

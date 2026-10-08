@@ -6,14 +6,16 @@ import logging
 from dataclasses import dataclass
 
 from .config import Config
-from .engine import SyncEngine
+from .engine import Inbox, SyncEngine
 from .httpc import ApiClient, Transport
 from .models import SOUNDCLOUD, SPOTIFY
 from .oauth import Authenticator, OAuthEndpoints
 from .providers.soundcloud import SoundCloudProvider
+from .providers.soundcloud_web import SoundCloudWebProvider
 from .providers.spotify import SpotifyProvider
 from .state import Store
 from .tokens import TokenStore
+from .websession import BrowserSession
 
 log = logging.getLogger("likesync.app")
 
@@ -25,6 +27,23 @@ class App:
     tokens: TokenStore
     auth: dict[str, Authenticator]
     providers: dict[str, object]
+    # Only set in SoundCloud web mode; owns the Chromium process.
+    web_session: BrowserSession | None = None
+
+    def inbox(self) -> Inbox | None:
+        """The intake playlist, when one is configured and readable."""
+        url = self.cfg.soundcloud.playlist_url.strip()
+        if not url:
+            return None
+        provider = self.providers[SOUNDCLOUD]
+        fetch = getattr(provider, "playlist_tracks", None)
+        if fetch is None:
+            log.warning(
+                "soundcloud.playlist_url is set but %s mode cannot read "
+                "playlists; ignoring it", self.cfg.soundcloud.mode,
+            )
+            return None
+        return Inbox(provider=SOUNDCLOUD, fetch=lambda: fetch(url))
 
     def engine(self) -> SyncEngine:
         return SyncEngine(
@@ -32,9 +51,12 @@ class App:
             spotify=self.providers[SPOTIFY],  # type: ignore[arg-type]
             soundcloud=self.providers[SOUNDCLOUD],  # type: ignore[arg-type]
             cfg=self.cfg.sync,
+            inbox=self.inbox(),
         )
 
     def close(self) -> None:
+        if self.web_session is not None:
+            self.web_session.close()
         self.store.close()
 
 
@@ -84,6 +106,8 @@ def build_app(cfg: Config, *, transport: Transport | None = None) -> App:
     )
 
     # --- SoundCloud ------------------------------------------------------
+    # Web mode needs no OAuth at all, but an Authenticator is still built so
+    # `status` and `login` can talk about both providers uniformly.
     sc_auth_client = client(cfg.soundcloud.auth_base, "soundcloud-auth")
     sc_auth = Authenticator(
         name=SOUNDCLOUD,
@@ -108,9 +132,24 @@ def build_app(cfg: Config, *, transport: Transport | None = None) -> App:
         auth_header=sc_auth.header,
         on_unauthorized=sc_auth.refresh_now,
     )
-    soundcloud = SoundCloudProvider(
-        sc_api, sc_auth, memo=store, write_mode=cfg.soundcloud.write_mode
-    )
+    web_session: BrowserSession | None = None
+    if cfg.soundcloud.mode == "web":
+        web_session = BrowserSession(
+            state_path=cfg.session_path,
+            executable_path=cfg.soundcloud.browser_executable or None,
+            headless=cfg.soundcloud.headless,
+        )
+        soundcloud: object = SoundCloudWebProvider(
+            web_session.page_proxy(),
+            memo=store,
+            max_scrolls=cfg.soundcloud.max_scrolls,
+            settle_ms=cfg.soundcloud.settle_ms,
+            write_pause_s=cfg.soundcloud.write_pause_s,
+        )
+    else:
+        soundcloud = SoundCloudProvider(
+            sc_api, sc_auth, memo=store, write_mode=cfg.soundcloud.write_mode
+        )
 
     return App(
         cfg=cfg,
@@ -118,4 +157,5 @@ def build_app(cfg: Config, *, transport: Transport | None = None) -> App:
         tokens=token_store,
         auth={SPOTIFY: sp_auth, SOUNDCLOUD: sc_auth},
         providers={SPOTIFY: spotify, SOUNDCLOUD: soundcloud},
+        web_session=web_session,
     )

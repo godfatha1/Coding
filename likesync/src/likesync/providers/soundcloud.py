@@ -40,6 +40,58 @@ def path_id(track_id: str) -> str:
     return urllib.parse.quote(tid, safe=":")
 
 
+def parse_track(raw: Any) -> Track | None:
+    """Build a Track from a SoundCloud track object.
+
+    Shared by the credentialed API provider and the browser-session provider:
+    api.soundcloud.com and api-v2.soundcloud.com return the same shape for the
+    fields that matter here.
+    """
+    if not isinstance(raw, dict):
+        return None
+    if raw.get("kind") not in (None, "track"):
+        return None
+    urn = raw.get("urn")
+    raw_id = raw.get("id")
+    if not urn and raw_id in (None, ""):
+        return None
+    # Keep ids in the URN form under both modes so a state file stays valid if
+    # you later switch between them.
+    track_id = str(urn) if urn else f"soundcloud:tracks:{raw_id}"
+
+    meta = raw.get("publisher_metadata") or {}
+    user = raw.get("user") or {}
+    artists: list[str] = []
+    for candidate in (meta.get("artist"), user.get("username")):
+        name = str(candidate).strip() if candidate else ""
+        if name and name not in artists:
+            artists.append(name)
+    # The uploader is frequently a label or promo channel, so note when that is
+    # all we have: matching then prefers the artist parsed out of the title.
+    artist_source = "publisher" if meta.get("artist") else "uploader"
+
+    title = str(raw.get("title") or "")
+    # full_duration is the real length; `duration` is the preview for
+    # snippet-only uploads.
+    duration = raw.get("full_duration") or raw.get("duration")
+    isrc = meta.get("isrc") or None
+
+    return Track(
+        provider=SOUNDCLOUD,
+        id=track_id,
+        title=title,
+        artists=tuple(artists),
+        duration_ms=int(duration) if duration else None,
+        isrc=str(isrc).strip() if isrc else None,
+        url=raw.get("permalink_url") or None,
+        raw_title=title,
+        extra={
+            "numeric_id": str(raw_id) if raw_id is not None else "",
+            "artist_source": artist_source,
+        },
+    )
+
+
 class SoundCloudProvider:
     name = SOUNDCLOUD
 
@@ -123,48 +175,7 @@ class SoundCloudProvider:
         return out, next_href
 
     def _parse(self, raw: Any) -> Track | None:
-        if not isinstance(raw, dict):
-            return None
-        if raw.get("kind") not in (None, "track"):
-            return None
-        urn = raw.get("urn")
-        raw_id = raw.get("id")
-        if not urn and raw_id in (None, ""):
-            return None
-        track_id = str(urn or raw_id)
-
-        meta = raw.get("publisher_metadata") or {}
-        user = raw.get("user") or {}
-        artists: list[str] = []
-        for candidate in (meta.get("artist"), user.get("username")):
-            name = str(candidate).strip() if candidate else ""
-            if name and name not in artists:
-                artists.append(name)
-        # The uploader is frequently a label or promo channel, so note when
-        # that is all we have: matching then prefers the artist parsed out of
-        # the title instead.
-        artist_source = "publisher" if meta.get("artist") else "uploader"
-
-        title = str(raw.get("title") or "")
-        # full_duration is the real length; `duration` is the preview for
-        # snippet-only uploads.
-        duration = raw.get("full_duration") or raw.get("duration")
-        isrc = meta.get("isrc") or None
-
-        return Track(
-            provider=SOUNDCLOUD,
-            id=track_id,
-            title=title,
-            artists=tuple(artists),
-            duration_ms=int(duration) if duration else None,
-            isrc=str(isrc).strip() if isrc else None,
-            url=raw.get("permalink_url") or None,
-            raw_title=title,
-            extra={
-                "numeric_id": str(raw_id) if raw_id is not None else "",
-                "artist_source": artist_source,
-            },
-        )
+        return parse_track(raw)
 
     # -- writing -----------------------------------------------------------
 

@@ -60,6 +60,7 @@ home = "{tmp_path}"
 client_id = "sp-client"
 
 [soundcloud]
+mode = "api"
 client_id = "sc-client"
 client_secret = "sc-secret"
 
@@ -215,3 +216,127 @@ def test_cli_tokens_export(tmp_path, capsys):
     import base64
     payload = json.loads(base64.b64decode(blob))
     assert set(payload["providers"]) == {"spotify", "soundcloud"}
+
+
+# --------------------------------------------------------------------------
+# web-mode CLI surface
+# --------------------------------------------------------------------------
+
+
+def web_config(tmp_path, extra: str = "") -> object:
+    cfg_path = tmp_path / "web.toml"
+    cfg_path.write_text(f"""
+home = "{tmp_path}"
+
+[spotify]
+client_id = "sp-client"
+
+[soundcloud]
+mode = "web"
+{extra}
+""")
+    return cfg_path
+
+
+def test_session_path_is_reported(tmp_path, capsys):
+    cfg_path = web_config(tmp_path)
+    assert main(["--config", str(cfg_path), "session", "path"]) == 0
+    assert "soundcloud-session.json" in capsys.readouterr().out
+
+
+def test_session_export_without_a_session_is_an_error(tmp_path, capsys):
+    cfg_path = web_config(tmp_path)
+    assert main(["--config", str(cfg_path), "session", "export"]) == 1
+    assert "No saved session" in capsys.readouterr().err
+
+
+def test_session_export_import_round_trip(tmp_path, capsys, monkeypatch):
+    cfg_path = web_config(tmp_path)
+    session_file = tmp_path / "soundcloud-session.json"
+    session_file.write_text(json.dumps({"cookies": [{"name": "x"}], "origins": []}))
+
+    assert main(["--config", str(cfg_path), "session", "export"]) == 0
+    blob = capsys.readouterr().out.strip()
+
+    session_file.unlink()
+    monkeypatch.setenv("LIKESYNC_SESSION", blob)
+    assert main(["--config", str(cfg_path), "session", "import"]) == 0
+    assert json.loads(session_file.read_text())["cookies"][0]["name"] == "x"
+    # Session files hold a live sign-in, so they must not be world readable.
+    assert oct(session_file.stat().st_mode & 0o777) == "0o600"
+
+
+def test_session_import_without_the_env_var_is_a_config_error(tmp_path, monkeypatch):
+    monkeypatch.delenv("LIKESYNC_SESSION", raising=False)
+    cfg_path = web_config(tmp_path)
+    assert main(["--config", str(cfg_path), "session", "import"]) == 2
+
+
+def test_session_forget_removes_the_sign_in(tmp_path, capsys):
+    cfg_path = web_config(tmp_path)
+    session_file = tmp_path / "soundcloud-session.json"
+    session_file.write_text("{}")
+    assert main(["--config", str(cfg_path), "session", "forget"]) == 0
+    assert not session_file.exists()
+    assert main(["--config", str(cfg_path), "session", "forget"]) == 0
+
+
+def test_status_reports_the_browser_session(tmp_path, capsys):
+    cfg_path = web_config(
+        tmp_path, 'playlist_url = "https://soundcloud.com/me/sets/sync-me"'
+    )
+    (tmp_path / "soundcloud-session.json").write_text("{}")
+    assert main(["--config", str(cfg_path), "status"]) == 0
+    out = capsys.readouterr().out
+    assert "browser session saved" in out
+    assert "inbox" in out and "sets/sync-me" in out
+
+
+def test_status_says_when_the_browser_session_is_missing(tmp_path, capsys):
+    cfg_path = web_config(tmp_path)
+    assert main(["--config", str(cfg_path), "status"]) == 0
+    assert "login soundcloud --web" in capsys.readouterr().out
+
+
+def test_reseed_is_a_no_op_when_nothing_was_taken_in(tmp_path, capsys):
+    cfg_path = web_config(tmp_path)
+    assert main(["--config", str(cfg_path), "reseed", "--yes"]) == 0
+    assert "nothing recorded" in capsys.readouterr().out
+
+
+def test_reseed_clears_the_inbox_memory(tmp_path, capsys):
+    from likesync.config import load_config
+    from likesync.state import Store
+
+    cfg_path = web_config(tmp_path)
+    cfg = load_config(cfg_path)
+    store = Store(cfg.state_path)
+    store.mark_playlist_seen("soundcloud", ["a", "b", "c"])
+    store.close()
+
+    assert main(["--config", str(cfg_path), "reseed", "--yes"]) == 0
+    assert "Cleared 3" in capsys.readouterr().out
+
+    store = Store(cfg.state_path)
+    assert store.playlist_seen("soundcloud") == set()
+    store.close()
+
+
+def test_probe_says_so_when_api_mode_has_none(tmp_path, capsys):
+    cfg_path = seed_config(tmp_path)  # api mode
+    assert main(["--config", str(cfg_path), "probe", "soundcloud"]) == 0
+    assert "no probe" in capsys.readouterr().out
+
+
+def test_web_mode_does_not_launch_a_browser_just_to_report_status(tmp_path):
+    """Constructing the providers must not spawn Chromium."""
+    from likesync.app import build_app
+    from likesync.config import load_config
+
+    cfg = load_config(web_config(tmp_path))
+    app = build_app(cfg)
+    try:
+        assert app.web_session is not None
+        assert app.web_session._browser is None, "browser launched too eagerly"
+    finally:
+        app.close()
