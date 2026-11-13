@@ -124,3 +124,30 @@ def test_schema_survives_reopen(tmp_path):
         assert second.mirror(SPOTIFY) == {"sp1"}
     finally:
         second.close()
+
+
+def test_rename_track_carries_everything_over(store):
+    old, new = "soundcloud:permalink:artist/old-name", "soundcloud:permalink:artist/new-name"
+    store.put_link("sp1", old, score=0.93)
+    store.set_mirror(SOUNDCLOUD, [old, "other"])
+    store.mark_playlist_seen(SOUNDCLOUD, [old])
+    store.add_ignore(SOUNDCLOUD, old, "kept")
+    store.cache_tracks([sc(old, "Artist - Song")])
+
+    store.rename_track(SOUNDCLOUD, old, new)
+
+    assert store.counterpart(SPOTIFY, "sp1") == new
+    assert store.counterpart(SOUNDCLOUD, new) == "sp1"
+    assert store.counterpart(SOUNDCLOUD, old) is None
+    assert store.mirror(SOUNDCLOUD) == {new, "other"}
+    assert store.playlist_seen(SOUNDCLOUD) == {new}
+    assert store.ignored(SOUNDCLOUD) == {new}
+    assert store.attempt(SOUNDCLOUD, new)["status"] == "matched"
+    assert store.cached_track(SOUNDCLOUD, old) is None
+    assert store.count_links() == 1
+
+
+def test_rename_track_to_itself_changes_nothing(store):
+    store.put_link("sp1", "sc1")
+    store.rename_track(SOUNDCLOUD, "sc1", "sc1")
+    assert store.counterpart(SPOTIFY, "sp1") == "sc1"

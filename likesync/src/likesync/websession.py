@@ -1,16 +1,18 @@
-"""A reusable signed-in browser window, driven through the page itself.
+"""A reusable signed-in browser window.
 
 SoundCloud has not granted new API applications in years, so the only way to
 read and write your own likes is to do what you would do by hand: open the
-site, look at the page, click the button. That is exactly what this does.
+site, scroll your likes, click the button. That is what this drives.
 
 Scope, deliberately narrow:
 
 * It never sees or stores your password. You sign in yourself, once, in a real
   browser window.
-* It does not read, extract or transmit any token, key or credential. It does
-  not call SoundCloud's internal endpoints. It reads the rendered page and
-  clicks controls, the same operations a person performs.
+* It does not read, extract or transmit any token, key or credential, and it
+  never sends a request of its own to SoundCloud's servers. It navigates,
+  scrolls and clicks, and it reads two things: the rendered page, and the
+  track lists the page loads for itself while you scroll (response bodies
+  only -- see ``BrowserPage._on_response``).
 * The only thing kept on disk is Playwright's storage state -- the ordinary
   browser profile that keeps you signed in between runs, the same as a browser
   on your own machine. It stays local, at mode 0600, and is encrypted when
@@ -24,8 +26,10 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, Self
@@ -36,6 +40,15 @@ from .secretfile import read_secret_json, write_secret_json
 log = logging.getLogger("likesync.websession")
 
 HOME = "https://soundcloud.com"
+# Where the site's own pages load their track lists from.
+DATA_HOST = "api-v2.soundcloud.com"
+# The only page-loaded data worth keeping: track lists. Everything else a page
+# fetches (comments, banners, payment plans, ...) is ignored.
+_DATA_PATHS = re.compile(
+    r"(?:^|/)(?:track_)?likes$"      # a user's liked tracks
+    r"|^/search/tracks$"             # search results
+    r"|^/tracks$"                    # details for rows as they scroll into view
+)
 LOGIN_TIMEOUT_S = 300.0
 # System browsers to fall back on when Playwright's own build is missing.
 _SYSTEM_BINARIES = (
@@ -70,6 +83,18 @@ class Page(Protocol):
         scrolls while the page was still growing -- which means any list read
         afterwards is incomplete.
         """
+        ...
+
+    def scroll_step(self, settle_ms: int = 450) -> int:
+        """Scroll to the bottom once, wait, and return the page height."""
+        ...
+
+    def start_capture(self) -> None:
+        """Start keeping the track lists this page loads for itself."""
+        ...
+
+    def captured(self) -> list[tuple[str, Any]]:
+        """``(path, parsed JSON)`` for each track list loaded since the last start."""
         ...
 
     def wait(self, ms: int) -> None: ...
@@ -179,6 +204,8 @@ class BrowserPage:
     _page: Any
     min_interval_s: float = 0.4
     _last: float = field(default=0.0, init=False)
+    _captured: list[tuple[str, Any]] = field(default_factory=list, init=False)
+    _capturing: bool = field(default=False, init=False)
 
     def _pace(self) -> None:
         # One person's library is not worth hammering anyone's servers over.
@@ -208,28 +235,71 @@ class BrowserPage:
             log.debug("click %s failed: %s", selector, exc)
             return False
 
+    def scroll_step(self, settle_ms: int = 450) -> int:
+        height = self._page.evaluate(
+            "() => { window.scrollTo(0, document.body.scrollHeight);"
+            " return document.body.scrollHeight; }"
+        )
+        self._page.wait_for_timeout(settle_ms)
+        return int(height or 0)
+
     def scroll_to_end(self, *, max_scrolls: int = 200, settle_ms: int = 450) -> bool:
-        """SoundCloud paginates by infinite scroll, so walk to the bottom."""
+        """Walk an infinite-scroll page to the bottom, judging by height alone.
+
+        Only a heuristic: "the page stopped growing" cannot be told apart from
+        "the next batch is slow". It therefore wants about three seconds of
+        stillness, and callers that can see the page's own end-of-list marker
+        should use that instead.
+        """
+        needed = max(4, -(-3000 // max(settle_ms, 1)))
         previous = -1
-        scrolls = 0
         stable = 0
-        while scrolls < max_scrolls:
-            height = self._page.evaluate(
-                "() => { window.scrollTo(0, document.body.scrollHeight);"
-                " return document.body.scrollHeight; }"
-            )
-            self._page.wait_for_timeout(settle_ms)
-            scrolls += 1
+        for _ in range(max_scrolls):
+            height = self.scroll_step(settle_ms)
             if height == previous:
                 stable += 1
-                # Two quiet rounds: one can just be a slow fetch.
-                if stable >= 2:
+                if stable >= needed:
                     return True
             else:
                 stable = 0
             previous = height
-        log.warning("scrolled %d times and the page was still growing", scrolls)
+        log.warning("scrolled %d times and the page was still growing", max_scrolls)
         return False
+
+    def start_capture(self) -> None:
+        self._captured = []
+        if not self._capturing:
+            self._page.on("response", self._on_response)
+            self._capturing = True
+
+    def _on_response(self, response: Any) -> None:
+        """Keep the track lists the page loads for itself.
+
+        Passive and narrow on purpose. Only the *body* of a finished response
+        is read, and only for track-list paths; nothing is read from any
+        request, and the query string is dropped before anything is stored.
+        likesync never issues a request of its own to this host.
+        """
+        try:
+            parsed = urllib.parse.urlparse(response.url)
+            if parsed.hostname != DATA_HOST or response.status != 200:
+                return
+            if parsed.path == "/me":
+                # Only the public profile address is kept, to find the
+                # signed-in user's own likes page.
+                body = response.json()
+                if isinstance(body, dict) and body.get("permalink_url"):
+                    self._captured.append(
+                        ("/me", {"permalink_url": str(body["permalink_url"])})
+                    )
+                return
+            if _DATA_PATHS.search(parsed.path):
+                self._captured.append((parsed.path, response.json()))
+        except Exception:  # noqa: BLE001,S110 - never let this break the page
+            pass
+
+    def captured(self) -> list[tuple[str, Any]]:
+        return list(self._captured)
 
     def wait(self, ms: int) -> None:
         self._page.wait_for_timeout(ms)
@@ -425,6 +495,15 @@ class LazyPage:
 
     def scroll_to_end(self, *, max_scrolls: int = 200, settle_ms: int = 450) -> bool:
         return self._page().scroll_to_end(max_scrolls=max_scrolls, settle_ms=settle_ms)
+
+    def scroll_step(self, settle_ms: int = 450) -> int:
+        return self._page().scroll_step(settle_ms)
+
+    def start_capture(self) -> None:
+        self._page().start_capture()
+
+    def captured(self) -> list[tuple[str, Any]]:
+        return self._page().captured()
 
     def wait(self, ms: int) -> None:
         self._page().wait(ms)

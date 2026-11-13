@@ -1,8 +1,10 @@
 """Spotify provider.
 
-February 2026 moved library writes from ``PUT/DELETE /v1/me/tracks`` (JSON
-``ids`` body, 50 per call) to ``PUT/DELETE /v1/me/library`` (``uris`` query
-parameter, 40 per call). Client ids created after the cutover get 403 on the
+Checked against Spotify's reference and its February 2026 changelog:
+``PUT/DELETE /v1/me/tracks`` (JSON ``ids`` body, 50 per call) were removed in
+favour of ``PUT/DELETE /v1/me/library`` (``uris`` query parameter, 40 per
+call); ``GET /v1/me/tracks`` remains; search results are capped at 10; and a
+track's ``external_ids`` (its ISRC) was removed and then restored in March. Client ids created after the cutover get 403 on the
 old routes, and some older apps were still being served them, so the write path
 probes once and remembers which variant this client is allowed to use.
 """
@@ -23,6 +25,7 @@ log = logging.getLogger("likesync.spotify")
 
 LIBRARY_BATCH = 40   # unified /me/library endpoint
 TRACKS_BATCH = 50    # legacy /me/tracks endpoint
+SEARCH_MAX = 10       # GET /search, since February 2026
 MODE_KEY = "spotify_write_mode"
 # Statuses that mean "this endpoint is not available to this client".
 _FALLBACK_STATUSES = frozenset({403, 404, 405, 410})
@@ -74,7 +77,9 @@ class SpotifyProvider:
         return tracks
 
     def search(self, query: str, limit: int = 10) -> list[Track]:
-        params = {"q": query, "type": "track", "limit": max(1, min(limit, 50))}
+        # February 2026 cut the search limit from 50 to 10; asking for more is
+        # an error, not a truncation.
+        params = {"q": query, "type": "track", "limit": max(1, min(limit, SEARCH_MAX))}
         if self.market:
             params["market"] = self.market
         payload = self.client.request("GET", "/search", params=params)

@@ -45,29 +45,53 @@ first authorise**, so roughly twice a year a run fails and you re-run
 ## SoundCloud web mode: read this
 
 Because SoundCloud will not issue credentials, likesync does on your behalf
-what you would do by hand: it opens your likes page in a real browser, reads
-what is on it, and clicks the like button on a track page.
+what you would do by hand: it opens your likes page in a real browser and
+scrolls it, and it opens a track's page and clicks the like button.
 
 What that means, stated plainly:
 
 - **It is contrary to SoundCloud's terms of service**, which prohibit
   automated access. It is your own account, your own library, nobody else's
-  data, and the request rate is far below ordinary human browsing — but the
-  decision is yours, and account action is a real if unlikely risk.
-- **It can break.** Page markup is not a published interface. The extractor is
-  written as layered selectors with a structural fallback, and if SoundCloud
-  renames every CSS class it still works by finding the track link and the
-  uploader link inside each row. But a big enough redesign will need a fix.
-  `likesync probe soundcloud` tells you in one command whether it can still
-  read the page.
-- **What it never does**: it does not handle your password (you sign in
-  yourself), and it does not read, extract or transmit any token or key. The
-  only thing stored is the ordinary browser profile that keeps you signed in
-  between runs, kept locally at mode `0600` and encrypted if you set
-  `LIKESYNC_SECRET_KEY`.
-- **It is slow on purpose.** Reads are one page load; each write is a page load
-  plus a click, spaced `write_pause_s` apart. A weekly sync of a few dozen
-  changes takes a couple of minutes.
+  data, and the pace is far below ordinary human browsing — but the decision is
+  yours, and account action is a real if unlikely risk.
+- **How it reads.** As you scroll your likes, the site loads them in batches;
+  likesync reads those batches as they arrive. They carry what the visible
+  rows do not — each track's duration, its ISRC where there is one, the real
+  artist — and they say outright when the list has ended. If that data is not
+  seen, it falls back to reading the visible rows, which works but matches
+  less well (rows show no duration at all; the site draws it on the waveform).
+- **What it never does.** It does not handle your password: you sign in
+  yourself. It does not read, extract or transmit any token or key. It never
+  sends a request of its own to SoundCloud's servers — it navigates, scrolls
+  and clicks, and reads what the page loaded. The only thing stored is the
+  ordinary browser profile that keeps you signed in between runs, kept locally
+  at mode `0600` and encrypted if you set `LIKESYNC_SECRET_KEY`.
+- **It can break.** None of this is a published interface. There are three
+  layers before it gives up (page data, visible rows, your public likes page),
+  and `likesync probe soundcloud` reports which of them work. But a big enough
+  redesign will need a fix.
+- **It is slow on purpose.** Reading a library is one page and some scrolling
+  (about 150 likes in 12 seconds). Each write is a page load plus a click,
+  spaced `write_pause_s` apart.
+
+### What has been checked against the real site
+
+Run against live soundcloud.com in November 2026, signed out, on public pages:
+reading a 148-track likes list both ways (the two agree exactly), the
+end-of-list detection, search, a playlist, the sign-in redirect, and locating
+the like button on a track page.
+
+**Not checked, because it needs your sign-in:** your own library page
+(`/you/likes`), and actually clicking like. Those are covered by tests against
+pages modelled on the real ones, and `likesync probe soundcloud` plus
+`likesync plan` are how you confirm them on your account before anything is
+written.
+
+That live run is also what caught two faults a markup-only reader has: a liked
+*playlist* sits in the same list as liked tracks and lists its own tracks
+inside its row, so they get counted as likes; and a track page has like buttons
+for *related* tracks too, so "the like button" is ambiguous unless it is scoped
+to the track itself. Both are handled, and there are tests named after them.
 
 If you would rather not: set `soundcloud.mode = "api"` and the credentialed
 path is fully implemented and tested, waiting for the day approval arrives.
@@ -389,8 +413,8 @@ Spotify gives you clean artist and title fields. SoundCloud gives you
 DOWNLOAD]"` posted by a promo channel. Bridging that is the hard part.
 
 **ISRC first.** When both sides publish an ISRC, an exact match is accepted
-immediately. (Web mode cannot see ISRCs — the page does not show them — so this
-only applies in `api` mode.)
+immediately. Roughly a fifth of a typical SoundCloud likes list carries one —
+the properly distributed releases.
 
 **Otherwise, parse and score.** Titles are decomposed into:
 
@@ -430,9 +454,15 @@ Delete propagation is the dangerous half of two-way sync, so it is fenced in.
   it had last run, the run aborts and writes nothing. A truncated read is
   indistinguishable from a mass unlike. Override with `--force-shrink` once
   you have checked.
-- **Incomplete reads fail loudly.** In web mode, if the likes page is still
-  loading more when the scroll cap is hit, the run errors instead of treating
-  the half-loaded list as your library.
+- **Incomplete reads fail loudly.** In web mode the site itself says when a
+  likes list has ended, and likesync waits for that. If the page promises more
+  and then stalls, the run errors instead of treating the half-loaded list as
+  your library. ("The page stopped growing" is not trusted as an ending unless
+  there is nothing better to go on.)
+- **A renamed track is not an unlike.** Web mode addresses a track by its URL,
+  which an uploader can change. The site's own stable id is kept alongside, so
+  a track that moved carries its pairing with it instead of reading as "unliked
+  here" and being removed from Spotify.
 - **Unlike cap.** More than `max_unlikes_per_run` (50) planned removals and all
   of them are skipped with a warning rather than applied. They are *held back*,
   not dropped: raise the limit or pass `--force-unlikes` and the next run
@@ -444,7 +474,9 @@ Delete propagation is the dangerous half of two-way sync, so it is fenced in.
   write would diverge the two libraries permanently.
 - **Writes verify themselves.** In web mode a like is read back off the button
   before it counts as done, and liking something already liked is a no-op
-  rather than a toggle.
+  rather than a toggle. Only the track's own button is ever clicked — if which
+  one that is cannot be told for certain, or the address has redirected
+  somewhere else, nothing is clicked and the track is reported as failed.
 - **Per-track failures are isolated.** One unlikeable track does not abort the
   run, and a rejected Spotify batch is retried one id at a time to find the
   culprit.
@@ -463,8 +495,11 @@ Every run is recorded — the plan, what was applied, what failed and why — in
   edits, DJ mixes and self-released demos simply do not exist there. They stay
   in `likesync unmatched` permanently, and that is the correct answer. Set
   `skip_longer_than_ms` to keep long mixes out of the matcher.
-- **Web mode has no ISRC**, so matching leans entirely on title, artist and
-  duration. It is the same matcher, just without the shortcut.
+- **Big libraries take a few runs to settle.** Each run has a search budget
+  (`max_searches_per_run`), kept modest on purpose, so a first sync of many
+  hundreds of tracks pairs them up over several runs — weeks, on a weekly
+  schedule. Nothing is lost in the meantime. To hurry it, run `likesync sync`
+  by hand a few times.
 - **SoundCloud does not expose when you liked something.** A genuine conflict —
   the same track liked on one side and unliked on the other since the last run
   — cannot be resolved by recency. The default `like_wins` keeps the track and
@@ -489,13 +524,18 @@ Every run is recorded — the plan, what was applied, what failed and why — in
 expired, which happens every few months. Re-run `likesync login soundcloud
 --web`.
 
-**Probe says the extractor needs updating.** SoundCloud changed their markup
-enough to defeat both the class selectors and the structural fallback. Send the
-probe output; the fix is contained in one JavaScript block in
-`providers/soundcloud_web.py`.
+**Probe says the page could not be read.** SoundCloud changed enough to defeat
+all three ways of reading your likes. Send the probe output. Meanwhile, setting
+`soundcloud.likes_url` to your public likes page
+(`https://soundcloud.com/<your-name>/likes`) may be enough on its own.
 
-**The run errors about the scroll limit.** Your likes list is longer than
-`max_scrolls` rounds can load. Raise `soundcloud.max_scrolls`. It fails rather
+**Probe says "visible rows only".** It can read your likes but not the data
+behind them, so matching runs without durations. It works; pairs are just more
+likely to land in the review list.
+
+**The run errors that your likes were still loading.** The page promised more
+and then stalled, or the list is longer than `max_scrolls` rounds. Run it
+again; raise `soundcloud.max_scrolls` for a very large library. It fails rather
 than syncing a partial library on purpose.
 
 **`403` on a Spotify like or unlike.** Your client id is subject to the
@@ -519,16 +559,17 @@ library really did shrink, then re-run with `--force-shrink`.
 ```bash
 cd likesync
 python3 -m pip install -e '.[dev,crypt]'
-python3 -m pytest              # 225 tests, no network
+python3 -m pytest              # 253 tests, no network
 ```
 
 The tests run entirely offline. Provider tests script HTTP at the transport
 seam and assert on real request shapes — paths, query strings, batch sizes,
-fallback order. The SoundCloud web provider is harder: soundcloud.com is not
-reachable from CI, so its DOM extractor is exercised **against representative
-markup rendered in real Chromium**, including a like button that genuinely
-toggles. That proves the JavaScript works — selectors, structural fallback,
-click-and-verify — not merely the Python around it.
+fallback order — and the Spotify side was checked against Spotify's reference
+and its February 2026 changelog. The SoundCloud web provider runs in **real
+Chromium against pages modelled on the live site**: the fixtures were written
+from the real markup and the real shape of the data a page loads, including
+like buttons that genuinely toggle. The same provider code was run against live
+soundcloud.com; the tests pin down what that run established.
 
 ```
 src/likesync/
@@ -538,7 +579,7 @@ src/likesync/
   providers/
     spotify.py          official API
     soundcloud.py       official API (for if approval ever arrives)
-    soundcloud_web.py   the DOM extractor and click-to-like
+    soundcloud_web.py   reads what the page loads; click-to-like
   websession.py         signed-in Chromium, persisted profile
   schedule.py           installs the weekly job (launchd / systemd / cron)
   setup_wizard.py       `likesync setup`: the whole install in one command

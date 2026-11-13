@@ -266,6 +266,48 @@ class SyncEngine:
         )
         return None
 
+    # -- renames -----------------------------------------------------------
+
+    def _adopt_renames(
+        self,
+        name: str,
+        tracks: dict[str, Track],
+        now: set[str],
+        previous: set[str],
+    ) -> int:
+        """Recognise tracks whose id changed but which are the same track.
+
+        In SoundCloud web mode a track is addressed by its URL, and an uploader
+        can change that. Unhandled, the old address reads as an unlike -- which
+        would be mirrored to Spotify -- and the new one as an unrelated like.
+        Where the service also reports a stable id (``extra["urn"]``), a
+        vanished track and a new one that share it are one track that moved.
+        """
+        vanished = previous - now
+        appeared = now - previous
+        if not vanished or not appeared:
+            return 0
+        by_urn = {
+            urn: track_id
+            for track_id in appeared
+            if (urn := (tracks[track_id].extra or {}).get("urn"))
+        }
+        if not by_urn:
+            return 0
+        moved = 0
+        for old in vanished:
+            cached = self.store.cached_track(name, old)
+            urn = (cached.extra or {}).get("urn") if cached else None
+            new = by_urn.get(urn) if urn else None
+            if not new:
+                continue
+            self.store.rename_track(name, old, new)
+            previous.discard(old)
+            previous.add(new)
+            moved += 1
+            log.info("%s: %s moved to %s; carried its history over", name, old, new)
+        return moved
+
     # -- inbox playlist ----------------------------------------------------
 
     def _take_inbox(
@@ -395,6 +437,19 @@ class SyncEngine:
             "soundcloud_library": len(now_ids[SOUNDCLOUD]),
         }
 
+        # A track that merely changed address must not read as unlike + like.
+        # The vanished id's cached details are still there to compare against:
+        # this run's tracks were cached under their own, new ids.
+        for name in self.providers:
+            moved = self._adopt_renames(
+                name, filtered[name], now_ids[name], prev_ids[name]
+            )
+            if moved:
+                report.warnings.append(
+                    f"{moved} track(s) changed address on {name}; their "
+                    "pairing and history were carried over."
+                )
+
         # --- phase 2: safety rail on library shrinkage -------------------
         # A truncated read would look like a mass unlike, so refuse to act on
         # a library that lost a large fraction of its tracks since last run.
@@ -456,7 +511,12 @@ class SyncEngine:
             ]
             consider[name] = fresh + backlog
 
-        for name, track_ids in consider.items():
+        # SoundCloud's tracks first. Finding their Spotify counterpart is one
+        # API call, often an exact ISRC hit, whereas the reverse costs a page
+        # load per search -- and every pair found the cheap way is a Spotify
+        # track that no longer needs the expensive search at all.
+        for name in sorted(consider, key=lambda n: n != SOUNDCLOUD):
+            track_ids = consider[name]
             target = other_provider(name)
             for track_id in track_ids:
                 track = filtered[name].get(track_id)

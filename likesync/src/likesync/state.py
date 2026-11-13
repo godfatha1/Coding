@@ -286,6 +286,33 @@ class Store:
             "SELECT * FROM attempts WHERE status=? ORDER BY last_try DESC", (status,)
         ).fetchall()
 
+    # -- renames -----------------------------------------------------------
+
+    def rename_track(self, provider: str, old: str, new: str) -> None:
+        """Carry everything known about ``old`` over to ``new``.
+
+        Used when a service changes a track's address without it being a
+        different track: the pairing, the baseline and the inbox memory all
+        have to follow it, or the next diff reads as an unlike plus a like.
+        """
+        if old == new:
+            return
+        column = "spotify_id" if provider == "spotify" else "soundcloud_id"
+        with self.transaction() as db:
+            # The new id cannot already hold a pairing of its own: it has only
+            # just appeared. Clear any stray row so the UNIQUE columns allow it.
+            db.execute(f"DELETE FROM links WHERE {column}=?", (new,))
+            db.execute(f"UPDATE links SET {column}=? WHERE {column}=?", (new, old))
+            for table in ("mirror", "ignores", "attempts", "playlist_seen"):
+                db.execute(
+                    f"UPDATE OR REPLACE {table} SET track_id=? "
+                    "WHERE provider=? AND track_id=?",
+                    (new, provider, old),
+                )
+            db.execute(
+                "DELETE FROM tracks WHERE provider=? AND track_id=?", (provider, old)
+            )
+
     # -- inbox playlist ----------------------------------------------------
 
     def playlist_seen(self, provider: str) -> set[str]:

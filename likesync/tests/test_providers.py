@@ -337,3 +337,17 @@ def test_soundcloud_search_reads_collection():
 ])
 def test_path_id_handles_urn_and_numeric_forms(raw, expected):
     assert path_id(raw) == expected
+
+
+def test_spotify_search_never_asks_for_more_than_the_api_allows():
+    """Since February 2026 a search limit above 10 is rejected outright."""
+    seen = []
+
+    def handler(req):
+        seen.append(req["query"]["limit"])
+        return json_response({"tracks": {"items": []}})
+
+    provider, _ = build_spotify({"GET /v1/search": handler})
+    provider.search("anything", limit=50)
+    provider.search("anything", limit=3)
+    assert seen == ["10", "3"]

@@ -53,6 +53,10 @@ class SoundCloudConfig:
     # A playlist used as an intake queue: drop a track in and it gets liked,
     # after which the normal two-way rules apply. Leave empty to disable.
     playlist_url: str = ""
+    # Your likes page. Empty means the library page, falling back to your
+    # public profile's likes page; set it to that page directly to skip the
+    # first attempt: https://soundcloud.com/<your-name>/likes
+    likes_url: str = ""
     browser_executable: str = ""
     headless: bool = True
     # Infinite scroll: enough rounds to reach the bottom of your likes. A run

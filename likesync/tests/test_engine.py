@@ -521,3 +521,94 @@ def test_dry_run_plans_the_inbox_without_taking_it_in(store, sync_cfg):
     assert any(a.inbox for a in report.planned)
     assert soundcloud.like_calls == []
     assert store.playlist_seen(SOUNDCLOUD) == set()
+
+
+# --------------------------------------------------------------------------
+# a track whose address changed is still the same track
+# --------------------------------------------------------------------------
+
+import dataclasses
+
+
+def moved_track(track_id, title, urn):
+    base = sc(track_id, title, ["Uploader"], 243_000)
+    return dataclasses.replace(base, extra={**base.extra, "urn": urn})
+
+
+def renamed_baseline(store):
+    """sp1 is paired with a SoundCloud track living at its old address."""
+    old = moved_track("soundcloud:permalink:m83/midnight-city", "M83 - Midnight City",
+                      "soundcloud:tracks:555")
+    store.cache_tracks([old, MIDNIGHT_SP])
+    store.put_link("sp1", old.id, score=0.95)
+    store.set_mirror(SPOTIFY, ["sp1"])
+    store.set_mirror(SOUNDCLOUD, [old.id])
+    return old
+
+
+def test_a_renamed_track_is_not_mistaken_for_an_unlike(store, sync_cfg):
+    """Web mode addresses a track by its URL, which an uploader can change."""
+    old = renamed_baseline(store)
+    new = moved_track("soundcloud:permalink:m83-official/midnight-city",
+                      "M83 - Midnight City", "soundcloud:tracks:555")
+
+    engine, spotify, soundcloud = make(
+        store, sync_cfg, spotify_lib=[MIDNIGHT_SP], soundcloud_lib=[new]
+    )
+    report = engine.run()
+
+    # Nothing to do -- above all, no unlike sent to Spotify.
+    assert report.planned == []
+    assert spotify.unlike_calls == []
+    assert "sp1" in spotify.library
+    # The pairing and the baseline followed the track to its new address.
+    assert store.counterpart(SPOTIFY, "sp1") == new.id
+    assert store.mirror(SOUNDCLOUD) == {new.id}
+    assert any("changed address" in w for w in report.warnings)
+    assert old.id not in store.mirror(SOUNDCLOUD)
+
+
+def test_a_rename_still_lets_later_changes_flow(store, sync_cfg):
+    renamed_baseline(store)
+    new = moved_track("soundcloud:permalink:m83-official/midnight-city",
+                      "M83 - Midnight City", "soundcloud:tracks:555")
+    engine, *_ = make(store, sync_cfg, spotify_lib=[MIDNIGHT_SP], soundcloud_lib=[new])
+    engine.run()
+
+    # Next week the Spotify like is removed; SoundCloud's copy, at its new
+    # address, must follow.
+    engine2, _, soundcloud2 = make(store, sync_cfg, spotify_lib=[], soundcloud_lib=[new])
+    report = engine2.run()
+    assert [(a.provider, a.action, a.track_id) for a in report.applied] == [
+        (SOUNDCLOUD, UNLIKE, new.id)
+    ]
+
+
+def test_a_different_track_at_a_new_address_is_not_merged(store, sync_cfg):
+    """Same shape of change, different stable id: a real unlike and a real like."""
+    renamed_baseline(store)
+    other = moved_track("soundcloud:permalink:someone/another-song",
+                        "Someone - Another Song", "soundcloud:tracks:999")
+    engine, spotify, _ = make(
+        store, sync_cfg, spotify_lib=[MIDNIGHT_SP], soundcloud_lib=[other]
+    )
+    report = engine.run()
+    assert (SPOTIFY, UNLIKE, "sp1") in [
+        (a.provider, a.action, a.track_id) for a in report.applied
+    ]
+    assert not any("changed address" in w for w in report.warnings)
+
+
+def test_the_cheap_direction_is_matched_first_and_spares_the_costly_one(store, sync_cfg):
+    """Both libraries hold the same track. Pairing it from the SoundCloud side
+    is one Spotify lookup; doing it from the Spotify side as well would be a
+    SoundCloud search -- a page load in web mode -- for nothing."""
+    engine, spotify, soundcloud = make(
+        store, sync_cfg, spotify_lib=[MIDNIGHT_SP], soundcloud_lib=[MIDNIGHT_SC]
+    )
+    report = engine.run()
+
+    assert store.counterpart(SOUNDCLOUD, "sc1") == "sp1"
+    assert spotify.search_calls, "the SoundCloud track was looked up on Spotify"
+    assert soundcloud.search_calls == [], "and so SoundCloud never had to be searched"
+    assert report.planned == []

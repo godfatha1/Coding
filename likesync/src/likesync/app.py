@@ -142,6 +142,7 @@ def build_app(cfg: Config, *, transport: Transport | None = None) -> App:
         soundcloud: object = SoundCloudWebProvider(
             web_session.page_proxy(),
             memo=store,
+            likes_url=cfg.soundcloud.likes_url,
             max_scrolls=cfg.soundcloud.max_scrolls,
             settle_ms=cfg.soundcloud.settle_ms,
             write_pause_s=cfg.soundcloud.write_pause_s,

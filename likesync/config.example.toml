@@ -54,18 +54,24 @@ mode = "web"
 # likes you have since deleted.
 # playlist_url = "https://soundcloud.com/your-name/sets/sync-me"
 
+# Your likes page. Leave empty: likesync reads your library, and falls back to
+# your public profile's likes page by itself. Set it only if `likesync probe
+# soundcloud` says neither could be read.
+# likes_url = "https://soundcloud.com/your-name/likes"
+
 # Path to a Chromium or Chrome binary. Empty means auto-detect.
 # browser_executable = ""
 
 # Run the browser invisibly. Sign-in always opens a visible window regardless.
 headless = true
 
-# Your likes page loads by infinite scroll. This is the cap on scroll rounds;
-# roughly 1 round per 20 tracks, so 400 covers about 8000 likes. A run that
-# hits the cap FAILS rather than syncing a partial library.
+# Your likes page loads by infinite scroll, about 24 tracks a round, so 400
+# rounds covers roughly 9000 likes. likesync stops as soon as the page says
+# the list has ended; a run that hits this cap first FAILS rather than syncing
+# a partial library.
 max_scrolls = 400
 
-# How long to wait for each scroll to load. Raise it on a slow connection.
+# Pause after each scroll, in milliseconds.
 settle_ms = 450
 
 # Pause between write actions, in seconds. Slow on purpose: this is a weekly
