@@ -1,13 +1,18 @@
 # /etc/systemd/system/likesync.timer
+#
+# System-wide install for a server, paired with the hardened likesync.service.
+# On a personal machine you do not need either file: `likesync schedule install`
+# sets up a per-user weekly job with no root access.
+#
 #   sudo systemctl enable --now likesync.timer
 #   systemctl list-timers likesync.timer
 [Unit]
-Description=Daily Spotify/SoundCloud liked-songs sync
+Description=Weekly Spotify/SoundCloud liked-songs sync
 
 [Timer]
-OnCalendar=daily
-# Spread the load and avoid hitting both APIs exactly at midnight.
-RandomizedDelaySec=1h
+OnCalendar=Sun *-*-* 10:17:00
+# Spread the load and stay off the exact minute everyone else picks.
+RandomizedDelaySec=30m
 # Catch up if the machine was asleep or off at the scheduled time.
 Persistent=true
 

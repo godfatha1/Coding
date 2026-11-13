@@ -1,11 +1,11 @@
 # likesync
 
 Keeps your **Spotify Liked Songs** and **SoundCloud Likes** in sync, both
-directions, once a day.
+directions, once a week.
 
 Like something on either service and it shows up on the other. Unlike it on
-either and it goes from both. Runs unattended from cron, a systemd timer,
-Docker or GitHub Actions, and is built to fail safe: a bad match or a truncated
+either and it goes from both. It installs its own weekly job, runs unattended,
+and is built to fail safe: a bad match or a truncated
 read should never wipe a library.
 
 **You do not need Spotify Premium and you do not need SoundCloud API approval.**
@@ -35,7 +35,7 @@ How that works, and what it costs you, is the next two sections.
 | --- | --- |
 | **Spotify Premium** | Not yours. A development-mode Spotify app needs Premium on the account that **owns the app**, and allows up to 5 allow-listed users who do **not** need it. So anyone you know with Premium creates the app once and allow-lists you. Two minutes of their time, no money, no further involvement. |
 | **SoundCloud API approval** | Not needed. SoundCloud stopped granting API applications years ago, so likesync drives soundcloud.com in a browser you sign in to yourself. See the warning below. |
-| **A machine to run it on** | Anything always-ish on: a laptop, a Pi, a small VPS. SoundCloud web mode needs a browser, so a one-time graphical sign-in is required somewhere — you can then copy the session to a headless box. |
+| **A machine to run it on** | Anything on for part of most weeks: a laptop is fine (a missed run is caught up on wake), or a Pi or small VPS. SoundCloud web mode needs a browser, so a one-time graphical sign-in is required somewhere — you can then copy the session to a headless box. |
 | **Python** | 3.11 or newer. |
 
 One ongoing chore: **Spotify refresh tokens expire about six months after you
@@ -66,8 +66,8 @@ What that means, stated plainly:
   between runs, kept locally at mode `0600` and encrypted if you set
   `LIKESYNC_SECRET_KEY`.
 - **It is slow on purpose.** Reads are one page load; each write is a page load
-  plus a click, spaced `write_pause_s` apart. A daily sync of a handful of
-  changes takes seconds to a couple of minutes.
+  plus a click, spaced `write_pause_s` apart. A weekly sync of a few dozen
+  changes takes a couple of minutes.
 
 If you would rather not: set `soundcloud.mode = "api"` and the credentialed
 path is fully implemented and tested, waiting for the day approval arrives.
@@ -99,7 +99,7 @@ pairings it has worked out. A run then:
    both sides publish one, otherwise by searching and scoring the results.
 5. Builds a plan, checks it against the [safety rails](#safety-rails), applies it.
 6. Records the new snapshot — but only for changes that actually propagated, so
-   a failed write is retried tomorrow instead of silently forgotten.
+   a failed write is retried on the next run instead of silently forgotten.
 
 **The first run is a merge, not a sync.** With no snapshot everything looks
 new, so both libraries end up with the union of the two. Nothing is ever
@@ -107,19 +107,47 @@ unliked on a first run. Use `likesync plan` first to see exactly what it would d
 
 ## Install
 
+One command, on the computer that will run it (macOS or Linux; Python 3.11+):
+
 ```bash
-git clone https://github.com/godfatha1/coding.git
-cd coding/likesync
-python3 -m venv venv
-./venv/bin/pip install '.[web,crypt]'
-./venv/bin/python -m playwright install chromium
+git clone -b ccr-0fca9d99-eer2q5 https://github.com/godfatha1/Coding.git
+cd Coding/likesync && ./setup.sh
 ```
 
-`[web]` pulls in Playwright for SoundCloud web mode; `[crypt]` encrypts the
-stored session and tokens at rest. In `api` mode likesync has **no runtime
-dependencies at all** — plain `pip install .` is enough.
+`setup.sh` installs likesync into a private `./venv`, fetches the browser it
+drives, and hands over to `likesync setup`, which walks through five steps and
+skips any that are already done:
 
-Then `./venv/bin/likesync --help`, or put the venv's `bin` on your `PATH`.
+1. **Configuration** — creates the config file; asks for the Spotify Client ID
+   and, optionally, an inbox playlist.
+2. **SoundCloud** — opens a browser window for you to sign in, then checks it
+   can read your likes page.
+3. **Spotify** — opens the consent screen for you to approve.
+4. **First look** — shows exactly what the first sync would change, and asks
+   before writing anything.
+5. **Schedule** — installs the weekly job (Sundays 10:17 by default).
+
+The only things it cannot do for you are the two sign-ins. Run it again any
+time — after a sign-in expires, or once the Client ID arrives — and it picks up
+where it stopped:
+
+```bash
+./setup.sh --spotify-client-id abc123 --weekday sat --at 09:00
+```
+
+On Windows there is no `setup.sh`; do the same by hand:
+
+```
+py -m venv venv
+venv\Scripts\python -m pip install -e ".[web,crypt]"
+venv\Scripts\python -m playwright install chromium
+venv\Scripts\python -m likesync setup
+```
+
+Windows scheduling uses Task Scheduler and has not been tested on a real
+machine; macOS and Linux are the tested paths.
+
+The rest of this page explains each step, for when you want to do one by hand.
 
 ## Set up Spotify
 
@@ -254,34 +282,45 @@ If you do not like the result, `likesync undo` reverses the whole run.
 
 ## Schedule it
 
-All of these just run `likesync sync` once a day.
+`likesync setup` does this for you. To do it, change it or undo it by hand:
 
-### systemd (recommended on Linux)
+```bash
+likesync schedule install                       # weekly: Sundays at 10:17
+likesync schedule install --weekday wed --at 07:30
+likesync schedule install --daily --at 04:05    # if weekly is not often enough
+likesync schedule show                          # print what it would install
+likesync schedule status
+likesync schedule remove
+```
+
+It picks whatever the machine has, per-user, with no administrator rights:
+
+| Machine | What gets installed | If the machine is off at the time |
+| --- | --- | --- |
+| macOS | a launchd agent in `~/Library/LaunchAgents` | runs when it next wakes |
+| Linux with systemd | a user timer in `~/.config/systemd/user` | caught up at next boot |
+| Linux without | one marked line in your crontab | that week is skipped |
+| Windows | a Task Scheduler task (untested) | that week is skipped |
+
+Output goes to `likesync.log` in the likesync home directory. On Linux, a user
+timer only runs while you are logged in unless you enable lingering:
+`loginctl enable-linger`.
+
+### A server, system-wide
+
+`deploy/likesync.service` and `deploy/likesync.timer` are a hardened
+system-level pair for a box that runs it under its own account:
 
 ```bash
 sudo cp deploy/likesync.service deploy/likesync.timer /etc/systemd/system/
 sudo $EDITOR /etc/systemd/system/likesync.service   # fix paths and the user
 sudo systemctl enable --now likesync.timer
-systemctl list-timers likesync.timer                # confirm the next run
-journalctl -u likesync.service -n 50                # read the last run
 ```
-
-`Persistent=true` means a machine asleep at the scheduled time catches up on
-wake, and a randomised delay keeps you off the hour.
-
-### cron
-
-See `deploy/crontab.example`. cron runs with almost no environment, so set
-`LIKESYNC_HOME` explicitly and use absolute paths.
-
-### macOS
-
-See `deploy/com.likesync.daily.plist`; copy it to `~/Library/LaunchAgents/`
-and `launchctl load` it.
 
 ### Docker
 
-The image bundles Chromium for web mode.
+The image bundles Chromium for web mode. It has no scheduler of its own; run
+it from the host's.
 
 ```bash
 docker build -t likesync ./likesync
@@ -295,16 +334,19 @@ container has no display.
 
 ### GitHub Actions
 
-`.github/workflows/likesync.yml` runs it daily with no machine of your own.
-Note the trade-off documented in the workflow: tokens and the browser session
-have to survive between runs, so it commits them — AES-GCM encrypted under
-`LIKESYNC_SECRET_KEY`, and the job refuses to run without that key. **If this
-repository is public, that encrypted blob is publicly readable.** For a public
-repo, prefer your own machine or a private repo.
+`.github/workflows/likesync.yml` runs it weekly with no machine of your own.
+Two caveats. Tokens and the browser session have to survive between runs, so
+the workflow commits them — AES-GCM encrypted under `LIKESYNC_SECRET_KEY`, and
+the job refuses to run without that key — which means **on a public repository
+that encrypted blob is publicly readable**. And SoundCloud web mode from a
+data-centre address is far more likely to be challenged as a bot than the same
+browser on your home connection. Your own machine is the better home for this.
 
 ## Everyday commands
 
 ```bash
+likesync setup             # do, or redo, whatever is not done yet
+likesync schedule status   # is the weekly job installed
 likesync status            # connections, library sizes, inbox, last run
 likesync probe soundcloud  # read-only: is the session good, can it read the page
 likesync plan              # what a sync would do, writing nothing
@@ -338,7 +380,7 @@ Useful flags on `sync`:
 | `--force-shrink` | proceed even if a library shrank suspiciously |
 
 Exit codes: `0` fine, `2` config or auth problem, `3` some writes failed (they
-retry tomorrow), `4` a safety rail aborted the run.
+retry on the next run), `4` a safety rail aborted the run.
 
 ## How matching works
 
@@ -376,7 +418,7 @@ At or above `accept_threshold` (0.78) a pair is linked automatically. Between
 `likesync link`. Below, it is reported unmatched and retried every couple of
 weeks, since the track may simply not be uploaded yet.
 
-Pairings are remembered, so this happens once per track, not daily. If you see
+Pairings are remembered, so this happens once per track, not every run. If you see
 a wrong pairing, `likesync unlink` it and `likesync link` the right one; manual
 links are never overwritten by the matcher.
 
@@ -477,7 +519,7 @@ library really did shrink, then re-run with `--force-shrink`.
 ```bash
 cd likesync
 python3 -m pip install -e '.[dev,crypt]'
-python3 -m pytest              # 177 tests, no network
+python3 -m pytest              # 225 tests, no network
 ```
 
 The tests run entirely offline. Provider tests script HTTP at the transport
@@ -498,6 +540,8 @@ src/likesync/
     soundcloud.py       official API (for if approval ever arrives)
     soundcloud_web.py   the DOM extractor and click-to-like
   websession.py         signed-in Chromium, persisted profile
+  schedule.py           installs the weekly job (launchd / systemd / cron)
+  setup_wizard.py       `likesync setup`: the whole install in one command
   oauth.py              PKCE, loopback redirect, refresh under lock
   tokens.py             token storage, optional AES-GCM at rest
   httpc.py              stdlib HTTP with retries + the test seam

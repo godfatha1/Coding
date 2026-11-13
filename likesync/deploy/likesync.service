@@ -14,7 +14,7 @@ Environment=LIKESYNC_HOME=/var/lib/likesync
 # in this file, mode 0600, owned by the likesync user.
 EnvironmentFile=-/etc/likesync/env
 ExecStart=/opt/likesync/venv/bin/likesync sync
-# A partial run (exit 3) is not a failure worth alerting on; it retries daily.
+# A partial run (exit 3) is not a failure worth alerting on; the next run retries.
 SuccessExitStatus=3
 
 # Hardening: this process needs the network and one state directory.

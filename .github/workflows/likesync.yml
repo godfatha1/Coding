@@ -1,6 +1,6 @@
 name: likesync
 
-# Daily two-way sync of Spotify and SoundCloud liked songs.
+# Weekly two-way sync of Spotify and SoundCloud liked songs.
 #
 # Before this works you need these repository secrets:
 #   LIKESYNC_SPOTIFY_CLIENT_ID
@@ -19,9 +19,9 @@ name: likesync
 
 on:
   schedule:
-    # 04:23 UTC. Not on the hour: scheduled jobs on the hour are the most
-    # delayed, and both APIs are busiest then.
-    - cron: "23 4 * * *"
+    # Sundays at 10:23 UTC. Not on the hour: scheduled jobs on the hour are
+    # the most delayed, and both services are busiest then.
+    - cron: "23 10 * * 0"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -137,7 +137,7 @@ jobs:
                   print(f"- `{sign}` {a['provider']}: {a['label']}")
               print("\n</details>")
           PY
-          # 3 means "some writes failed"; they retry tomorrow, so do not fail
+          # 3 means "some writes failed"; they retry next week, so do not fail
           # the job. 4 means a safety rail aborted the run, which is worth a red X.
           if [ "$code" = "3" ]; then exit 0; fi
           exit $code

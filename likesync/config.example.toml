@@ -68,7 +68,7 @@ max_scrolls = 400
 # How long to wait for each scroll to load. Raise it on a slow connection.
 settle_ms = 450
 
-# Pause between write actions, in seconds. Slow on purpose: this is a daily
+# Pause between write actions, in seconds. Slow on purpose: this is a weekly
 # background job, and there is no reason for it to look like a crawler.
 write_pause_s = 1.5
 

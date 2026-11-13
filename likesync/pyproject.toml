@@ -1,14 +1,14 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "likesync"
 version = "1.0.0"
-description = "Two-way daily sync between Spotify and SoundCloud liked songs"
+description = "Two-way weekly sync between Spotify and SoundCloud liked songs"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
 # No runtime dependencies on purpose: this runs unattended from cron for years,
 # and a dependency resolution failure at 04:00 is worse than a little more code.
 dependencies = []

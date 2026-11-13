@@ -1,6 +1,6 @@
 """A small HTTP client built on the standard library.
 
-Deliberately dependency-free: this runs from cron every day for years, and a
+Deliberately dependency-free: this runs unattended for years, and a
 pip resolution failure at 04:00 is a worse outcome than writing 150 lines of
 retry logic. The ``Transport`` seam keeps the provider tests offline.
 """

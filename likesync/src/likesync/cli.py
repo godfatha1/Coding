@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import __version__
+from . import __version__, schedule, setup_wizard
 from .app import build_app
 from .config import Config, load_config
 from .errors import AuthError, ConfigError, LikeSyncError, QuotaExceeded
@@ -64,6 +64,34 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-q", "--quiet", action="store_true")
     parser.add_argument("--log-file", help="also write logs here")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    def add_when(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("--daily", action="store_true",
+                            help="run every day instead of once a week")
+        parser.add_argument("--weekday", choices=schedule.WEEKDAYS, default="sun",
+                            help="day of the weekly run (default: sun)")
+        parser.add_argument("--at", default="10:17", metavar="HH:MM",
+                            help="local time of the run (default: 10:17)")
+
+    p = sub.add_parser(
+        "setup", help="sign in, check and schedule the weekly sync in one go"
+    )
+    p.add_argument("--spotify-client-id", default="",
+                   help="Client ID of the Spotify app to use")
+    p.add_argument("--playlist", default="",
+                   help="SoundCloud playlist URL to use as an inbox")
+    add_when(p)
+    p.add_argument("--no-schedule", action="store_true",
+                   help="do everything except installing the schedule")
+    p.add_argument("--manual", action="store_true",
+                   help="Spotify: paste the redirect URL instead of a local callback")
+    p.add_argument("--apply", action="store_true",
+                   help="run the first sync straight away, without asking")
+    p.add_argument("--yes", action="store_true", help="never prompt")
+
+    p = sub.add_parser("schedule", help="run the sync automatically")
+    p.add_argument("action", choices=("install", "status", "remove", "show"))
+    add_when(p)
 
     p = sub.add_parser("login", help="connect a service")
     p.add_argument("provider", choices=PROVIDERS)
@@ -151,6 +179,43 @@ def build_parser() -> argparse.ArgumentParser:
 # ---------------------------------------------------------------------------
 # commands
 # ---------------------------------------------------------------------------
+
+
+def _wizard_options(args: argparse.Namespace) -> setup_wizard.Options:
+    return setup_wizard.Options(
+        spotify_client_id=getattr(args, "spotify_client_id", ""),
+        playlist=getattr(args, "playlist", ""),
+        frequency="daily" if args.daily else "weekly",
+        weekday=args.weekday,
+        at=args.at,
+        schedule=not getattr(args, "no_schedule", False),
+        interactive=not getattr(args, "yes", False) and sys.stdin.isatty(),
+        manual=getattr(args, "manual", False),
+        apply=getattr(args, "apply", False),
+    )
+
+
+def cmd_setup(args: argparse.Namespace, cfg: Config) -> int:
+    return setup_wizard.run_setup(cfg, _wizard_options(args))
+
+
+def cmd_schedule(args: argparse.Namespace, cfg: Config) -> int:
+    if args.action == "status":
+        installed, detail = schedule.status(plan_home=cfg.home)
+        print(detail)
+        return EXIT_OK if installed else EXIT_ERROR
+    if args.action == "remove":
+        for line in schedule.remove(plan_home=cfg.home):
+            print(line)
+        return EXIT_OK
+
+    plan = setup_wizard.make_plan(cfg, _wizard_options(args))
+    if args.action == "show":
+        print(f"Would sync {plan.describe()} by running:\n  {' '.join(plan.command)}")
+        return EXIT_OK
+    for line in schedule.install(plan):
+        print(line)
+    return EXIT_OK
 
 
 def _soundcloud_web(args: argparse.Namespace, cfg: Config) -> bool:
@@ -602,6 +667,8 @@ def cmd_tokens(args: argparse.Namespace, cfg: Config) -> int:
 COMMANDS = {
     "login": cmd_login,
     "logout": cmd_logout,
+    "setup": cmd_setup,
+    "schedule": cmd_schedule,
     "status": cmd_status,
     "probe": cmd_probe,
     "session": cmd_session,

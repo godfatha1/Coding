@@ -16,7 +16,6 @@ Two provider quirks drive the design:
 from __future__ import annotations
 
 import base64
-import fcntl
 import json
 import os
 import time
@@ -26,6 +25,39 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .errors import AuthError, ConfigError
+
+try:  # POSIX
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
+    import msvcrt
+
+
+def _lock_exclusive(fd: int) -> None:
+    """Block until this process holds the lock file."""
+    if fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return
+    # msvcrt.LK_LOCK retries for about ten seconds and then raises, so keep
+    # asking for a minute before giving up.
+    for attempt in range(6):  # pragma: no cover - Windows
+        try:
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            return
+        except OSError:
+            if attempt == 5:
+                raise
+
+
+def _unlock(fd: int) -> None:
+    if fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return
+    try:  # pragma: no cover - Windows
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    except OSError:
+        pass
+
 
 ENV_SECRET_KEY = "LIKESYNC_SECRET_KEY"
 ENV_SEED = "LIKESYNC_TOKENS"
@@ -124,11 +156,11 @@ class TokenStore:
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
         fh = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o600)
         try:
-            fcntl.flock(fh, fcntl.LOCK_EX)
+            _lock_exclusive(fh)
             yield
         finally:
             try:
-                fcntl.flock(fh, fcntl.LOCK_UN)
+                _unlock(fh)
             finally:
                 os.close(fh)
 

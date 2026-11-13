@@ -23,6 +23,8 @@ Playwright is an optional dependency (``pip install 'likesync[web]'``). The
 from __future__ import annotations
 
 import logging
+import os
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,13 +37,14 @@ log = logging.getLogger("likesync.websession")
 
 HOME = "https://soundcloud.com"
 LOGIN_TIMEOUT_S = 300.0
-# Where a stock Playwright install and this image keep Chromium.
-_KNOWN_BINARIES = (
-    "/opt/pw-browsers/chromium-1194/chrome-linux/chrome",
+# System browsers to fall back on when Playwright's own build is missing.
+_SYSTEM_BINARIES = (
     "/usr/bin/chromium",
     "/usr/bin/chromium-browser",
     "/usr/bin/google-chrome",
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
 )
 
 
@@ -72,11 +75,89 @@ class Page(Protocol):
     def wait(self, ms: int) -> None: ...
 
 
+NO_SCREEN = (
+    "this machine has no screen to open a sign-in window on. Sign in on a "
+    "computer with a display (likesync login soundcloud --web), then carry "
+    "the session over with `likesync session export` and `session import`."
+)
+
+
+def has_display() -> bool:
+    """Can a visible window be opened here? Only Linux can lack one."""
+    if not sys.platform.startswith("linux"):
+        return True
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def discover_browsers() -> list[str]:
+    """Chromium-family binaries on this machine, most specific first.
+
+    Globbed rather than listed by build number: a pinned path such as
+    ``chromium-1194`` goes stale the first time the image is rebuilt.
+    """
+    found: list[str] = []
+
+    def add(path: str | Path) -> None:
+        text = str(path)
+        if text and text not in found and Path(text).exists():
+            found.append(text)
+
+    add(os.environ.get("LIKESYNC_BROWSER", ""))
+    roots = [os.environ.get("PLAYWRIGHT_BROWSERS_PATH", ""), "/opt/pw-browsers"]
+    for root in roots:
+        if not root or not Path(root).is_dir():
+            continue
+        add(Path(root) / "chromium")  # a stable symlink, where one exists
+        for pattern in ("chromium-*/chrome-linux*/chrome",
+                        "chromium-*/chrome-mac*/Chromium.app/Contents/MacOS/Chromium",
+                        "chromium-*/chrome-win*/chrome.exe"):
+            for match in sorted(Path(root).glob(pattern), reverse=True):
+                add(match)
+    for candidate in _SYSTEM_BINARIES:
+        add(candidate)
+    return found
+
+
 def find_browser() -> str | None:
-    for candidate in _KNOWN_BINARIES:
-        if Path(candidate).exists():
-            return candidate
-    return None
+    found = discover_browsers()
+    return found[0] if found else None
+
+
+def launch_chromium(pw: Any, *, headless: bool, executable_path: str | None = None) -> Any:
+    """Launch Chromium, preferring the build Playwright manages itself.
+
+    An explicit ``executable_path`` is used as given. Otherwise Playwright's
+    own download is tried first -- it is the one build guaranteed to match the
+    installed Playwright -- and only then whatever browsers the machine has.
+    """
+    if not headless and not has_display():
+        raise ConfigError(NO_SCREEN)
+
+    options: dict[str, Any] = {
+        "headless": headless,
+        "args": ["--no-sandbox", "--disable-dev-shm-usage"],
+    }
+    candidates: list[str | None]
+    candidates = [executable_path] if executable_path else [None, *discover_browsers()]
+    last = ""
+    for candidate in candidates:
+        kwargs = dict(options)
+        if candidate:
+            kwargs["executable_path"] = candidate
+        try:
+            return pw.chromium.launch(**kwargs)
+        except Exception as exc:
+            text = str(exc)
+            if "Missing X server" in text or "$DISPLAY" in text:
+                raise ConfigError(NO_SCREEN) from exc
+            # Playwright appends the whole launch log; the first line says it.
+            last = text.strip().splitlines()[0] if text.strip() else type(exc).__name__
+            log.debug("could not launch %s: %s", candidate or "managed Chromium", text)
+    raise ConfigError(
+        f"could not launch a browser ({last}).\n"
+        "Install one with: python3 -m playwright install chromium\n"
+        "Or set soundcloud.browser_executable to an existing Chrome or Chromium."
+    )
 
 
 def _playwright():
@@ -173,22 +254,13 @@ class BrowserSession:
 
     def _launch(self, *, headless: bool, with_state: bool) -> None:
         self._pw = _playwright()().start()
-        launch_kw: dict[str, Any] = {
-            "headless": headless,
-            "args": ["--no-sandbox", "--disable-dev-shm-usage"],
-        }
-        executable = self.executable_path or find_browser()
-        if executable:
-            launch_kw["executable_path"] = executable
         try:
-            self._browser = self._pw.chromium.launch(**launch_kw)
-        except Exception as exc:
+            self._browser = launch_chromium(
+                self._pw, headless=headless, executable_path=self.executable_path
+            )
+        except Exception:
             self._shutdown()
-            raise ConfigError(
-                f"could not launch Chromium: {exc}\n"
-                "Install it with: python3 -m playwright install chromium\n"
-                "Or set soundcloud.browser_executable to an existing binary."
-            ) from exc
+            raise
 
         context_kw: dict[str, Any] = {
             "viewport": {"width": 1400, "height": 1000},

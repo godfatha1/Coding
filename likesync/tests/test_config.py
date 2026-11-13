@@ -130,3 +130,74 @@ def test_state_and_token_paths_follow_home(tmp_path):
     cfg = load_config(write(tmp_path, f'home = "{tmp_path}"\n'))
     assert cfg.state_path == tmp_path / "state.sqlite3"
     assert cfg.token_path == tmp_path / "tokens.json"
+
+
+# --- editing a config file in place -----------------------------------------
+
+import tomllib
+
+from likesync.config import set_config_value
+
+
+def test_set_config_value_creates_the_file_and_section(tmp_path):
+    path = tmp_path / "deep" / "config.toml"
+    set_config_value(path, "spotify", "client_id", "abc123")
+    assert tomllib.loads(path.read_text()) == {"spotify": {"client_id": "abc123"}}
+
+
+def test_set_config_value_replaces_in_place_and_keeps_comments(tmp_path):
+    path = write(tmp_path, """# my notes
+[spotify]
+# the id from Sam
+client_id = "PUT_THE_SPOTIFY_CLIENT_ID_HERE"
+redirect_uri = "http://127.0.0.1:8765/callback"
+
+[sync]
+direction = "both"
+""")
+    set_config_value(path, "spotify", "client_id", "real-id")
+    text = path.read_text()
+    assert "# my notes" in text and "# the id from Sam" in text
+    data = tomllib.loads(text)
+    assert data["spotify"]["client_id"] == "real-id"
+    assert data["spotify"]["redirect_uri"].endswith("/callback")
+    assert data["sync"]["direction"] == "both"
+    assert text.count("client_id") == 1
+
+
+def test_set_config_value_adds_a_key_to_the_right_section(tmp_path):
+    path = write(tmp_path, '[spotify]\nclient_id = "x"\n\n[soundcloud]\nmode = "web"\n')
+    set_config_value(path, "soundcloud", "playlist_url", "https://soundcloud.com/me/sets/in")
+    data = tomllib.loads(path.read_text())
+    assert data["soundcloud"] == {
+        "mode": "web", "playlist_url": "https://soundcloud.com/me/sets/in"
+    }
+    assert "playlist_url" not in data["spotify"]
+
+
+def test_set_config_value_ignores_a_commented_out_example(tmp_path):
+    path = write(tmp_path, '[soundcloud]\n# playlist_url = "https://example"\nmode = "web"\n')
+    set_config_value(path, "soundcloud", "playlist_url", "https://real")
+    text = path.read_text()
+    assert '# playlist_url = "https://example"' in text
+    assert tomllib.loads(text)["soundcloud"]["playlist_url"] == "https://real"
+
+
+def test_set_config_value_writes_typed_values_and_escapes_strings(tmp_path):
+    path = tmp_path / "c.toml"
+    set_config_value(path, "soundcloud", "headless", False)
+    set_config_value(path, "sync", "max_unlikes_per_run", 7)
+    set_config_value(path, "soundcloud", "browser_executable", 'C:\\Program Files\\x "y"')
+    data = tomllib.loads(path.read_text())
+    assert data["soundcloud"]["headless"] is False
+    assert data["sync"]["max_unlikes_per_run"] == 7
+    assert data["soundcloud"]["browser_executable"] == 'C:\\Program Files\\x "y"'
+
+
+def test_edited_file_still_loads_as_a_config(tmp_path):
+    path = tmp_path / "c.toml"
+    set_config_value(path, "spotify", "client_id", "abc")
+    set_config_value(path, "soundcloud", "mode", "web")
+    cfg = load_config(path)
+    assert cfg.spotify.client_id == "abc"
+    cfg.validate()

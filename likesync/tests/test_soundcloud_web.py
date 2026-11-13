@@ -20,11 +20,27 @@ from likesync.providers.soundcloud_web import (
     track_url,
     web_track_id,
 )
-from likesync.websession import BrowserPage, find_browser
+from likesync.websession import BrowserPage, launch_chromium
 
-CHROME = find_browser()
+
+def _chromium_available() -> bool:
+    """Can a browser actually be launched here, the way production does it?"""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ModuleNotFoundError:
+        return False
+    pw = sync_playwright().start()
+    try:
+        launch_chromium(pw, headless=True).close()
+        return True
+    except Exception:  # noqa: BLE001 - any failure means "skip the browser tests"
+        return False
+    finally:
+        pw.stop()
+
+
 needs_browser = pytest.mark.skipif(
-    CHROME is None, reason="no Chromium binary available"
+    not _chromium_available(), reason="no launchable Chromium"
 )
 
 
@@ -78,7 +94,7 @@ def browser():
     from playwright.sync_api import sync_playwright
 
     pw = sync_playwright().start()
-    b = pw.chromium.launch(executable_path=CHROME, args=["--no-sandbox"])
+    b = launch_chromium(pw, headless=True)
     yield b
     b.close()
     pw.stop()
@@ -314,3 +330,69 @@ def test_probe_says_when_not_signed_in(browser):
     page.goto = to_signin
     report = provider.probe()
     assert "not signed in" in report["verdict"]
+
+
+# --------------------------------------------------------------------------
+# launching a browser
+# --------------------------------------------------------------------------
+
+
+def test_a_visible_window_on_a_screenless_machine_fails_fast_and_clearly(monkeypatch):
+    """The sign-in window cannot open on a server; say so, not a launch log."""
+    from likesync import websession
+    from likesync.errors import ConfigError
+
+    monkeypatch.setattr(websession.sys, "platform", "linux")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+
+    class NeverLaunched:
+        class chromium:
+            @staticmethod
+            def launch(**kwargs):
+                raise AssertionError("should not try to launch without a screen")
+
+    with pytest.raises(ConfigError, match="no screen") as caught:
+        websession.launch_chromium(NeverLaunched(), headless=False)
+    assert "session export" in str(caught.value)
+    assert "\n" not in str(caught.value)
+
+
+def test_launch_failure_is_reported_in_one_line(monkeypatch):
+    from likesync import websession
+    from likesync.errors import ConfigError
+
+    monkeypatch.setattr(websession, "discover_browsers", list)
+
+    class Broken:
+        class chromium:
+            @staticmethod
+            def launch(**kwargs):
+                raise RuntimeError("Executable doesn't exist at /x/chrome\nCall log:\n"
+                                   + "  - noise\n" * 50)
+
+    with pytest.raises(ConfigError) as caught:
+        websession.launch_chromium(Broken(), headless=True)
+    message = str(caught.value)
+    assert "Executable doesn't exist at /x/chrome" in message
+    assert "Call log" not in message and "noise" not in message
+
+
+def test_launch_falls_back_to_a_browser_already_on_the_machine(monkeypatch):
+    from likesync import websession
+
+    monkeypatch.setattr(websession, "discover_browsers", lambda: ["/usr/bin/some-chrome"])
+    tried: list[str | None] = []
+
+    class OnlySystemBrowser:
+        class chromium:
+            @staticmethod
+            def launch(**kwargs):
+                tried.append(kwargs.get("executable_path"))
+                if "executable_path" not in kwargs:
+                    raise RuntimeError("managed build not downloaded")
+                return "browser"
+
+    assert websession.launch_chromium(OnlySystemBrowser(), headless=True) == "browser"
+    # Playwright's own build first, then what the machine already has.
+    assert tried == [None, "/usr/bin/some-chrome"]

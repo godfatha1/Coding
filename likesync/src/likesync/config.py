@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -294,3 +296,52 @@ def _apply_env(cfg: Config) -> None:
                 setattr(obj, key, _coerce(value, hints[key]))
             except (TypeError, ValueError, ConfigError) as exc:
                 raise ConfigError(f"bad value for {name}: {exc}") from exc
+
+
+def _toml_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    # JSON string escaping is a subset of TOML's basic-string escaping.
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def set_config_value(path: Path, section: str, key: str, value: Any) -> None:
+    """Set one key in a TOML file, leaving every other line and comment alone.
+
+    Replaces the key where it is already set, otherwise adds it under the
+    section header, creating the section or the file as needed. The result is
+    parsed before it is written, so a bad edit can never corrupt the file.
+    """
+    path = Path(path)
+    lines = path.read_text().splitlines() if path.is_file() else []
+    entry = f"{key} = {_toml_value(value)}"
+    header = re.compile(rf"^\s*\[{re.escape(section)}\]\s*(#.*)?$")
+    any_header = re.compile(r"^\s*\[")
+    assignment = re.compile(rf"^\s*{re.escape(key)}\s*=")
+
+    start = next((i for i, line in enumerate(lines) if header.match(line)), None)
+    if start is None:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines += [f"[{section}]", entry]
+    else:
+        end = next(
+            (i for i in range(start + 1, len(lines)) if any_header.match(lines[i])),
+            len(lines),
+        )
+        for i in range(start + 1, end):
+            if assignment.match(lines[i]):
+                lines[i] = entry
+                break
+        else:
+            lines.insert(start + 1, entry)
+
+    text = "\n".join(lines) + "\n"
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"refusing to write {path}: the edit would break it ({exc})") from exc
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
